@@ -12,9 +12,9 @@
 
 ## Qwen 配置
 
-线上服务使用北京地域的百炼通用 API Key。本机交互测试支持 Token Plan 专用接口：QWEN_ACCESS_MODE=token-plan-local；此模式在生产构建中禁用。
+支持北京地域百炼通用接口（QWEN_ACCESS_MODE=standard）及 Token Plan 专用接口（QWEN_ACCESS_MODE=token-plan）。本机原有 token-plan-local 配置作为兼容别名保留。
 
-在忽略的 .dev.vars 中配置与 .env.example 一致的变量：QWEN_API_KEY、QWEN_CHAT_MODEL、QWEN_ASR_MODEL、QWEN_TTS_MODEL。托管环境使用 Sites secret，不要把凭证写入源码或浏览器。
+在忽略的 .dev.vars 中配置与 .env.example 一致的变量：QWEN_API_KEY、QWEN_ACCESS_MODE、QWEN_CHAT_MODEL、QWEN_ASR_MODEL、QWEN_TTS_MODEL、QWEN_VOICE。Site 的变量独立配置；QWEN_API_KEY 使用 Sites secret，其余模型设置使用环境变量。不要把凭证写入源码或浏览器。
 
 通用接口默认模型：qwen-plus（对话与安排方案）、qwen3-asr-flash（语音识别）、qwen3-tts-flash（中文朗读）。本机 Token Plan 测试使用 qwen3.8-flash、qwen-audio-3.0-asr-flash、qwen-audio-3.0-tts-plus，音色 longanhuan_v3.6。浏览器录音在本机转为 16kHz 单声道 WAV 后提交。识别文本可编辑，安排方案需要检查后应用；没有密钥时明确显示未配置。
 
@@ -32,4 +32,4 @@
 npm run build
 node --experimental-strip-types --test tests/domain.test.mjs
 
-测试记录见 tests/verification.md。现有 Token Plan 密钥已完成本机真实语音识别、方案生成、日程保存和语音播放。本站线上环境未配置该套餐密钥。
+测试记录见 tests/verification.md。现有 Token Plan 密钥已完成本机真实语音识别、方案生成、日程保存和语音播放。Site 测试使用服务端配置，保持站点仅本人可访问。
