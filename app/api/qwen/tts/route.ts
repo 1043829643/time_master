@@ -1,0 +1,4 @@
+import {qwen,qwenConfig} from '@/lib/qwen';
+import {owner,guardOrigin,readJson,errorResponse,ApiError} from '@/lib/store';
+import {z} from 'zod';
+export async function POST(req:Request){try{guardOrigin(req);await owner(req);const {text}=z.object({text:z.string().trim().min(1).max(600)}).parse(await readJson(req));const r=await qwen({model:qwenConfig().tts,input:{text,voice:'Cherry',language_type:'Chinese'}},'tts');const url=new URL(r.output?.audio?.url||'');if(!['http:','https:'].includes(url.protocol)||!url.hostname.endsWith('.aliyuncs.com'))throw new ApiError('Qwen 未返回有效音频地址。',502);url.protocol='https:';const audio=await fetch(url,{redirect:'error',signal:AbortSignal.timeout(30000)});if(!audio.ok||!audio.body)throw new ApiError('语音音频暂时无法获取，请重试。',502);return new Response(audio.body,{headers:{'Content-Type':audio.headers.get('content-type')||'audio/wav','Cache-Control':'no-store'}})}catch(e){return errorResponse(e)}}
