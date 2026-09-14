@@ -17,8 +17,25 @@
 | 模拟 Agent 回复 | 展示待应用方案，用户应用后真实写入本地 D1 日程 |
 | WebMCP | 浏览器原生上下文不可用；用注册器测试替身验证两个工具及无效输入处理，不等同原生兼容性验证 |
 
-## 尚未完成的真实供应商联测
+## 已完成的本机真实 Qwen 联测
 
-用户给出的文件仍为 Token Plan 套餐凭证，且未替换。依据阿里云的套餐用途限制，未用它调用自建网站后端。Qwen ASR、qwen-plus 与 TTS 的真实响应、音质、延迟及账单结果尚未验证。上述语音模拟测试不能算作真实 Qwen 连通。
+本次由用户在 Codex 内手动发起交互测试，使用现有 Token Plan 密钥及官方套餐专用域名。此前将套餐使用限制扩大为“不能做任何测试”的判断已纠正。本机采用 token-plan-local 模式，未上传套餐密钥到托管环境；生产构建禁用该模式。
 
-拿到北京地域的百炼通用 API Key 后，在服务端配置密钥，执行：中文语音 → ASR 文本 → 项目/日程方案 → 检查并保存 → Qwen TTS 播放；同时验证超时、权限拒绝、取消与重复提交。生产访问由平台登录和 owner-only 发布策略保护；本地测试不替代生产平台认证检查。
+| 真实调用 | 证据 |
+| --- | --- |
+| qwen3.8-flash 文本连接 | HTTP 200，回复“连接成功”，用量 46 tokens |
+| qwen-audio-3.0-tts-plus 合成 | HTTP 200，生成 4.72 秒、24kHz 单声道 WAV；音色 longanhuan_v3.6 |
+| qwen-audio-3.0-asr-flash 识别 | HTTP 200，正确识别“明天上午10点到11点，安排时间管理大师的语音测试。” |
+| 浏览器录音转换与真实 ASR | 使用上述语音作为模拟麦克风输入，通过网页录音、WAV 转换和实际供应商请求，识别正确 |
+| 真实 Agent 方案 | qwen3.8-flash 生成明天 10:00–11:00 的独立测试日程，通过校验并显示方案 |
+| 应用方案 | 用户交互点击应用后实际写入本地 D1；日程视图正确显示 |
+| 真实 Qwen 朗读 | /api/qwen/tts 返回 200，HTMLAudioElement.play 成功，出现停止朗读按钮，停止成功 |
+
+联测发现并修复：Cloudflare fetch 不支持 redirect:error，改为 manual 并检查 HTTP 状态；Token Plan 的 TTS 使用独立 SpeechSynthesizer 路径，ASR 使用 DashScope 多模态路径并读取 output.text。已有通用接口保留。
+
+限制：测试音频来自 Qwen 合成，不是用户本人麦克风录制；没有测试实时 WebSocket 连续对话。网页当前采用录音→识别→编辑发送→方案应用→朗读的分段交互。单次测试的延迟和音质不代表长期性能。
+
+官方依据：
+- https://help.aliyun.com/zh/model-studio/token-plan-personal-overview
+- https://help.aliyun.com/zh/model-studio/token-plan-multimodal-gen
+- https://help.aliyun.com/zh/model-studio/non-realtime-speech-recognition-user-guide
