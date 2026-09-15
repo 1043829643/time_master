@@ -1,2 +1,3 @@
-import {sqliteTable,text,integer} from 'drizzle-orm/sqlite-core';
+import {sqliteTable,text,integer,primaryKey} from 'drizzle-orm/sqlite-core';
 export const workspaces=sqliteTable('workspaces',{owner:text('owner').primaryKey(),payload:text('payload').notNull(),revision:integer('revision').notNull().default(0),updatedAt:text('updated_at').notNull()});
+export const chatReceipts=sqliteTable('chat_receipts',{owner:text('owner').notNull(),requestId:text('request_id').notNull(),requestText:text('request_text').notNull(),reply:text('reply').notNull(),proposal:text('proposal'),workRevision:integer('work_revision').notNull(),commitToken:text('commit_token').notNull(),createdAt:text('created_at').notNull()},table=>[primaryKey({columns:[table.owner,table.requestId]})]);

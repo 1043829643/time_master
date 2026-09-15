@@ -8,6 +8,13 @@
       "when": 1789389850653,
       "tag": "0000_daily_patch",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "6",
+      "when": 1789443434640,
+      "tag": "0001_oval_trauma",
+      "breakpoints": true
     }
   ]
 }

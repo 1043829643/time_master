@@ -8,12 +8,12 @@ export const blockSchema=z.object({id,taskId:z.string().max(100).default(''),nam
 export const contactSchema=z.object({id,name,wechat:z.string().max(150).default(''),notes:note,roles:z.array(z.object({projectId:id,role:z.string().max(300)})).max(100).default([])});
 export const resourceSchema=z.object({id,projectId:id,name,device:z.string().max(160).default(''),path:z.string().max(2000),purpose:note});
 export const messageSchema=z.object({id,role:z.enum(['user','assistant']),content:z.string().max(16000),at:z.string()});
-export const dataSchema=z.object({projects:z.array(projectSchema).max(100),tasks:z.array(taskSchema).max(1500),blocks:z.array(blockSchema).max(2000),contacts:z.array(contactSchema).max(500),resources:z.array(resourceSchema).max(1000),messages:z.array(messageSchema).max(80),appliedIds:z.array(z.string()).max(100),history:z.array(z.object({at:z.string(),summary:z.string()})).max(80)});
+export const dataSchema=z.object({workRevision:z.number().int().min(0).default(0),projects:z.array(projectSchema).max(100),tasks:z.array(taskSchema).max(1500),blocks:z.array(blockSchema).max(2000),contacts:z.array(contactSchema).max(500),resources:z.array(resourceSchema).max(1000),messages:z.array(messageSchema).max(80),appliedIds:z.array(z.string()).max(100),history:z.array(z.object({at:z.string(),summary:z.string()})).max(80)});
 export type Project=z.infer<typeof projectSchema>;export type Task=z.infer<typeof taskSchema>;export type Block=z.infer<typeof blockSchema>;export type Contact=z.infer<typeof contactSchema>;export type Resource=z.infer<typeof resourceSchema>;export type Data=z.infer<typeof dataSchema>;
 export type Snapshot={data:Data;revision:number};
 export type Operation={type:'project.save'|'project.delete'|'task.save'|'task.delete'|'block.save'|'block.delete'|'contact.save'|'contact.delete'|'resource.save'|'resource.delete'|'message.add';data?:unknown;id?:string};
 export const operationSchema=z.object({type:z.enum(['project.save','project.delete','task.save','task.delete','block.save','block.delete','contact.save','contact.delete','resource.save','resource.delete','message.add']),data:z.unknown().optional(),id:z.string().optional()});
-export function emptyData():Data{return {projects:[],tasks:[],blocks:[],contacts:[],resources:[],messages:[],appliedIds:[],history:[]};}
+export function emptyData():Data{return {workRevision:0,projects:[],tasks:[],blocks:[],contacts:[],resources:[],messages:[],appliedIds:[],history:[]};}
 export function localDay(){return new Intl.DateTimeFormat('en-CA',{timeZone:'Asia/Shanghai',year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date());}
 export function addDays(date:string,n:number){const d=new Date(date+'T12:00:00Z');d.setUTCDate(d.getUTCDate()+n);return d.toISOString().slice(0,10);}
 export function daysBetween(a:string,b:string){return Math.round((+new Date(b+'T12:00:00Z')-+new Date(a+'T12:00:00Z'))/86400000);}
@@ -38,7 +38,7 @@ export function applyOperations(current:Data,raw:unknown,operationId:string,summ
  case 'block.delete':d.blocks=d.blocks.filter(b=>b.id!==op.id);break;case 'resource.delete':d.resources=d.resources.filter(r=>r.id!==op.id);break;
  case 'contact.delete':d.contacts=d.contacts.filter(c=>c.id!==op.id);d.tasks=d.tasks.map(t=>t.contactId===op.id?{...t,contactId:''}:t);break;
  case 'message.add':d.messages.push(messageSchema.parse(op.data));d.messages=d.messages.slice(-80);break;}}
- for(const t of d.tasks){const p=d.projects.find(p=>p.id===t.projectId);if(p){if(t.start<p.start)p.start=t.start;if(t.end>p.end)p.end=t.end;}}validateData(d);d.appliedIds=[...d.appliedIds,operationId].slice(-100);d.history=[...d.history,{at:new Date().toISOString(),summary:summary.slice(0,300)}].slice(-80);return d;
+ if(ops.some(op=>op.type!=='message.add')){for(const t of d.tasks){const p=d.projects.find(p=>p.id===t.projectId);if(p){if(t.start<p.start)p.start=t.start;if(t.end>p.end)p.end=t.end;}}d.workRevision=(d.workRevision||0)+1;d.history=[...d.history,{at:new Date().toISOString(),summary:summary.slice(0,300)}].slice(-80);}validateData(d);d.appliedIds=[...d.appliedIds,operationId].slice(-100);return d;
 }
 export function collisions(d:Data,block:Block){return d.blocks.filter(b=>b.id!==block.id&&!b.done&&b.start<block.end&&b.end>block.start);}
 export const statusLabels={todo:'待开始',doing:'进行中',waiting:'等待',done:'已完成',paused:'暂停'};
