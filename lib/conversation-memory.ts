@@ -1,5 +1,5 @@
 import {z} from 'zod';
-import {applyOperations,localDay,type Data,type Operation} from './domain.ts';
+import {applyOperations,localDay,addDays,type Data,type Operation} from './domain.ts';
 import {commitGuard,jsonChunks} from './workspace-storage.ts';
 
 const day=z.string().regex(/^\d{4}-\d{2}-\d{2}$/).refine(v=>{const d=new Date(v+'T00:00:00Z');return !isNaN(d.getTime())&&d.toISOString().slice(0,10)===v},'日期无效');
@@ -71,7 +71,7 @@ export function constraintViolations(data:Data,ops:Operation[],memories:Conversa
   const original=data.blocks.find(b=>b.id===block.id);
   if(!block.start||block.done)continue;
   const date=block.start.slice(0,10),task=after.tasks.find(t=>t.id===block.taskId);
-  const deadline=task?.deadlineAt||(task?.deadline?task.deadline+'T23:59':'');if(changed.has(block.id)&&deadline&&block.end>deadline)problems.push(`「${block.name}」超出硬截止 ${deadline.replace('T',' ')}。`);
+  const deadline=task?.deadlineAt||(task?.deadline?addDays(task.deadline,1)+'T00:00':'');if(changed.has(block.id)&&deadline&&block.end>deadline)problems.push(`「${block.name}」超出硬截止 ${deadline.replace('T',' ')}。`);
   for(const m of memories){
    if(m.certainty!=='confirmed'||m.date&&m.date!==date)continue;
    if(!m.date&&memories.some(exception=>exception.certainty==='confirmed'&&exception.date===date&&exception.rule===m.rule&&exception.subjectId===m.subjectId))continue;
