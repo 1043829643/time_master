@@ -41,7 +41,7 @@ export function releasableBlocks(data:Data,taskId?:string){return data.blocks.fi
 export type ChangeWarning={code:string;message:string};
 export function describeChanges(data:Data,operations:Operation[]){
  const names={project:'项目',task:'事项',block:'日程',contact:'联系人',resource:'工程位置'};
- const lines=operations.slice(0,4).map(op=>{const kind=op.type.split('.')[0] as keyof typeof names,v=op.data as any,collection=kind==='project'?data.projects:kind==='task'?data.tasks:kind==='block'?data.blocks:kind==='contact'?data.contacts:data.resources,old=collection.find(x=>x.id===(op.id||v?.id));return (op.type.endsWith('.delete')?'删除':old?'更新':'新增')+names[kind]+'「'+(v?.name||old?.name||'记录')+'」'+(v?.start||v?.end?'：'+String(v.start||((old as any)?.start)||'未定').replace('T',' ')+' → '+String(v.end||((old as any)?.end)||'未定').replace('T',' '):'');});
+ const lines=operations.slice(0,4).map(op=>{const kind=op.type.split('.')[0] as keyof typeof names,v=op.data as any,collection=kind==='project'?data.projects:kind==='task'?data.tasks:kind==='block'?data.blocks:kind==='contact'?data.contacts:data.resources,old=collection.find(x=>x.id===(op.id||v?.id));const project=(kind==='task'||kind==='resource')?data.projects.find(p=>p.id===(v?.projectId||(old as any)?.projectId)):undefined;return (op.type.endsWith('.delete')?'删除':old?'更新':'新增')+names[kind]+'「'+(v?.name||old?.name||'记录')+'」'+(project?'（'+project.name+'）':'')+(v?.start||v?.end?'：'+String(v.start||((old as any)?.start)||'未定').replace('T',' ')+' → '+String(v.end||((old as any)?.end)||'未定').replace('T',' '):'');});
  return (lines.join('；')+(operations.length>4?'；另有 '+(operations.length-4)+' 项变更。':'。')).slice(0,300);
 }
 export function changeWarnings(data:Data,operations:Operation[]):ChangeWarning[]{
@@ -55,7 +55,7 @@ export function warningsForChange(data:Data,after:Data,operations:Operation[]=[]
  if(overlaps.length>50)warnings.push({code:'overlap-limit',message:'重叠日程较多，这里只列出前 50 组。请在日历中继续核对，或分开恢复。'});
  for(const op of operations){
   const value=op.data as any;
-  if(op.type.endsWith('.delete'))warnings.push({code:'delete',message:describeChanges(data,[op])+(op.type==='project.delete'?'其事项、未完成且未固定的日程和工程记录也会删除；已完成和固定日程保留为独立记录，电脑文件不受影响。':op.type==='task.delete'?'未完成且未固定的关联日程会删除；已完成和固定日程保留为独立记录，其他事项解除对它的依赖。':op.type==='contact.delete'?'事项中的联系人关联也会解除。':'')});
+   if(op.type.endsWith('.delete'))warnings.push({code:'delete',message:describeChanges(data,[op])+(op.type==='project.delete'?'其事项、未完成且未固定的日程和工程记录也会删除；已完成和固定日程保留为独立记录，电脑文件不受影响。':op.type==='task.delete'?'未完成且未固定的关联日程会删除；已完成和固定日程保留为独立记录，其他事项解除对它的依赖。':op.type==='contact.delete'?'事项和日程中的联系人关联也会解除。':'')});
   if(op.type==='block.save'||op.type==='block.delete'){
    const previous=data.blocks.find(b=>b.id===(op.id||value?.id)),next=after.blocks.find(b=>b.id===previous?.id);
    if(previous?.fixed&&(!next||next.start!==previous.start||next.end!==previous.end||!next.fixed))warnings.push({code:'fixed',message:'将调整固定安排「'+previous.name+'」，请确认时间已经协商。'});

@@ -1,7 +1,7 @@
 import {applyOperations,type Data,type Operation,type Block} from './domain.ts';
 import {mergeChanges,type ChangeBaseline} from './changes.ts';
 
-export type ReviewablePlan={id:string;operations:Operation[];baseline?:ChangeBaseline;workRevision:number;summary:string};
+export type ReviewablePlan={id:string;operations:Operation[];baseline?:ChangeBaseline;workRevision:number;summary:string;requestText?:string;protocolVersion?:number};
 export function proposalData(data:Data,operations:Operation[]){return operations.length?applyOperations(data,operations,'preview-'+crypto.randomUUID()):data;}
 export function proposalReferences(data:Data,operations:Operation[]){
  const result={projects:new Map(data.projects.map(v=>[v.id,v.name])),tasks:new Map(data.tasks.map(v=>[v.id,v.name])),contacts:new Map(data.contacts.map(v=>[v.id,v.name]))};
@@ -30,9 +30,9 @@ export function pendingPlanWarnings(data:Data,plans:ReviewablePlan[],targets?:Se
  return warnings;
 }
 export function pendingContext(data:Data,plans:ReviewablePlan[],budget=12000){
- const included:{summary:string;operations:Operation[];stale:boolean}[]=[];let length=0;
+ const included:{id:string;requestText?:string;summary:string;operations:Operation[];stale:boolean;status:string}[]=[];let length=0;
  for(const p of plans){let stale=false;try{if(p.baseline)mergeChanges(data,p.operations,p.baseline);else stale=p.workRevision!==data.workRevision}catch{stale=true}
-  const value={summary:p.summary,operations:p.operations,stale},size=JSON.stringify(value).length;if(length+size>budget)continue;included.push(value);length+=size;
+  const value={id:p.id,requestText:p.requestText,summary:p.summary,operations:p.operations,stale:stale||p.protocolVersion===0,status:'pending'},size=JSON.stringify(value).length;if(length+size>budget)continue;included.push(value);length+=size;
  }
  return {pendingProposals:included,pendingProposalCount:plans.length,omittedPendingCount:plans.length-included.length};
 }

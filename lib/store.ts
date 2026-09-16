@@ -7,6 +7,8 @@ import {applyOperations,emptyData,validateData,type Data,type Snapshot} from './
 import {loadWorkspace,readOperation,type OperationReceipt} from './workspace-storage';
 import {fingerprint} from './fingerprint';
 import {stable} from './changes';
+import {readMemories,constraintViolations} from './conversation-memory';
+import {localDay} from './domain';
 export class ApiError extends Error{constructor(message:string,public status=400,public details?:unknown){super(message)}}
 export async function owner(req:Request){const u=await getChatGPTUser();if(u)return u.userId;const host=new URL(req.url).hostname;if(process.env.NODE_ENV!=='production'&&['127.0.0.1','localhost','[::1]'].includes(host))return 'local-owner';throw new ApiError('请先登录后使用工作空间。',401);}
 export function guardOrigin(req:Request){const origin=req.headers.get('origin');if(origin&&origin!==new URL(req.url).origin)throw new ApiError('请求来源不匹配。',403);}
@@ -24,13 +26,15 @@ export async function writeWorkspace(user:string,base:number,ops:unknown,operati
    const receipt=await readChatReceipt(binding(),user,operationId.slice(0,-6));
    if(!receipt?.proposal)throw new ApiError('方案不存在，请重新读取。',409);
    if(receipt.proposal_state==='applied')return current;
-   if(receipt.proposal_state==='dismissed')throw new ApiError('这个方案已放弃，请重新安排。',409);
+   if(receipt.proposal_state!=='pending')throw new ApiError(receipt.state_reason||'这份方案已经撤回或被新决定替代，请查看最新安排。',409,{code:'PLAN_CLOSED',snapshot:current});
+   if(receipt.protocol_version===0)throw new ApiError('这份早期方案需要按当前安排重新整理。',409,{code:'PLAN_CLOSED',snapshot:current});
    const proposal=proposalSchema.parse(JSON.parse(receipt.proposal));requested=proposal.operations;description=proposal.summary;origin=receipt.base_records?JSON.parse(receipt.base_records):undefined;expected=receipt.work_revision;
   }
   if(!origin&&(expected===undefined?current.revision!==base:current.data.workRevision!==expected))throw new ApiError('项目或日程已有其他修改。你的输入仍保留，请同步最新数据后核对。',409,{code:'STALE',snapshot:current});
   let merged;
   try{merged=origin?mergeChanges(current.data,requested,origin):requested as import('./domain').Operation[];}catch(e){if(e instanceof ChangeConflict)throw new ApiError(e.message,409,{code:'FIELD_CONFLICT',conflicts:e.conflicts,snapshot:current});if(e instanceof MergeValidationError)throw new ApiError(e.message,409,{code:'INVALID_MERGE',message:e.message,operations:e.operations,snapshot:current,conflicts:[]});throw e;}
   const warnings=changeWarnings(current.data,merged);
+  if(operationId.endsWith('-apply')){const violations=constraintViolations(current.data,merged,await readMemories(binding(),user,localDay()));if(violations.length)throw new ApiError('方案与已确认的限制不符，请调整后再应用。',409,{code:'CONSTRAINT_CONFLICT',warnings:violations,snapshot:current});}
   if(warnings.length&&reviewedRevision!==current.data.workRevision)throw new ApiError('请核对这次修改对现有安排的影响。',409,{code:'REVIEW_REQUIRED',warnings,snapshot:current});
   const data=merged.length?applyOperations(current.data,merged,operationId,description):{...current.data,appliedIds:[...current.data.appliedIds,operationId].slice(-100)};
   if(await commitWorkspace(binding(),user,current,data,operationId,hash))return {data,revision:current.revision+1,receipt:(await readOperation(binding(),user,operationId))!};

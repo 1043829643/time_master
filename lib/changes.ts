@@ -32,7 +32,7 @@ function deletionScope(data:Data,kind:Kind,id:string){
   affected.blocks=data.blocks.filter(b=>tasks.has(b.taskId));
  }
  if(kind==='project'){affected.resources=data.resources.filter(r=>r.projectId===id);affected.contacts=data.contacts.filter(c=>c.roles.some(r=>r.projectId===id));}
- if(kind==='contact')affected.tasks=data.tasks.filter(t=>t.contactId===id);
+ if(kind==='contact'){affected.tasks=data.tasks.filter(t=>t.contactId===id);affected.blocks=data.blocks.filter(b=>b.contactId===id);}
  return stable(affected);
 }
 export function captureBaseline(data:Data,operations:Operation[]):ChangeBaseline{

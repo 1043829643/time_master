@@ -20,7 +20,7 @@ export function restorePlan(current:Data,source:BackupData,mode:RestoreMode,requ
   const value:any={...structuredClone(original),id};
   if(mode==='copies'&&key==='projects')value.name=(value.name+'（恢复副本）').slice(0,160);
   if(key==='tasks'){value.projectId=maps.projects.get(value.projectId);value.dependencies=value.dependencies.map((id:string)=>maps.tasks.get(id));value.contactId=value.contactId?maps.contacts.get(value.contactId):'';}
-  if(key==='blocks')value.taskId=value.taskId?maps.tasks.get(value.taskId):'';
+  if(key==='blocks'){value.taskId=value.taskId?maps.tasks.get(value.taskId):'';if(value.contactId)value.contactId=maps.contacts.get(value.contactId)||'';}
   if(key==='resources')value.projectId=maps.projects.get(value.projectId);
   if(key==='contacts')value.roles=value.roles.map((r:any)=>({...r,projectId:maps.projects.get(r.projectId)}));
   (next[key] as any[]).push(value);counts[key]++;

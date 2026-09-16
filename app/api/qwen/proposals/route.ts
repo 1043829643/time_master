@@ -14,7 +14,7 @@ export async function POST(req:Request){try{
   const snapshot=await readWorkspace(user),receipt=await readChatReceipt(db,user,id.slice(0,-6));
   if(!receipt?.proposal)throw new ApiError('方案不存在，请重新读取。',404);
   if(receipt.proposal_state==='applied')throw new ApiError('这个方案已在其他页面应用，请查看最新安排。',409,{snapshot});
-  if(receipt.proposal_state==='dismissed')return Response.json({ok:true,snapshot});
+  if(receipt.proposal_state!=='pending')return Response.json({ok:true,snapshot});
   if(await dismissProposal(db,user,snapshot,id.slice(0,-6)))return Response.json({ok:true,snapshot:{...snapshot,revision:snapshot.revision+1}});
  }
  throw new ApiError('其他页面正在更新，请重试。',409);

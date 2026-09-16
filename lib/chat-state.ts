@@ -5,23 +5,26 @@ import {changeWarnings} from './planning.ts';
 import {pendingPlanWarnings,type ReviewablePlan} from './proposal-review.ts';
 import {commitHeader,commitGuard,recordStatements,commitRecords,workspaceRevision} from './workspace-storage.ts';
 import {hydrateReceipts,chatPartStatements} from './chat-parts.ts';
+import {targetStatements,transitionStatements,type PlanTransition} from './proposal-lifecycle.ts';
+import {memoryStatements,type ConversationMemory} from './conversation-memory.ts';
 
 export const proposalSchema=z.object({summary:z.string().min(1).max(300),operations:z.array(operationSchema).min(1).max(30)});
 export type Proposal=z.infer<typeof proposalSchema>;
-export type Receipt={request_text:string;reply:string;proposal:string|null;work_revision:number;proposal_state?:string;base_records?:string|null};
+export type Receipt={request_text:string;reply:string;proposal:string|null;work_revision:number;proposal_state?:string;base_records?:string|null;protocol_version?:number;state_reason?:string|null;superseded_by?:string|null};
 export type Draft=Proposal&{id:string;revision:number;workRevision:number;requestText?:string;createdAt?:string;baseline?:ChangeBaseline;blocked?:string;warnings?:string[];pendingWarnings?:string[]};
 
 export async function readChatReceipt(db:D1Database,user:string,requestId:string){
- const row=await db.prepare('SELECT request_id,request_text,reply,proposal,work_revision,proposal_state,base_records,payload_version FROM chat_receipts WHERE owner = ? AND request_id = ?').bind(user,requestId).first<Receipt&{request_id:string;payload_version:number}>();
+ const row=await db.prepare('SELECT request_id,request_text,reply,proposal,work_revision,proposal_state,base_records,payload_version,protocol_version,state_reason,superseded_by FROM chat_receipts WHERE owner = ? AND request_id = ?').bind(user,requestId).first<Receipt&{request_id:string;payload_version:number}>();
  return row?(await hydrateReceipts(db,user,[row]))[0]:null;
 }
 export function savedChat(snapshot:Snapshot,requestId:string,text:string,receipt:Receipt){
  if(receipt.request_text!==text)throw new Error('这次重试的内容已改变，请重新发送。');
  const parsed=proposalSchema.safeParse(receipt.proposal?JSON.parse(receipt.proposal):null);
- const alreadyApplied=snapshot.data.appliedIds.includes(requestId+'-apply')||receipt.proposal_state==='applied'||receipt.proposal_state==='dismissed';
+ const alreadyApplied=snapshot.data.appliedIds.includes(requestId+'-apply')||!!receipt.proposal_state&&receipt.proposal_state!=='pending';
  let baseline:ChangeBaseline|undefined,blocked:string|undefined,warnings:string[]=[];
  if(parsed.success&&!alreadyApplied){try{
   baseline=receipt.base_records?JSON.parse(receipt.base_records):undefined;
+  if(receipt.protocol_version===0)blocked='这份方案来自升级前，请按当前安排重新整理，避免沿用已经改变的决定。';
   if(!baseline&&receipt.work_revision!==snapshot.data.workRevision)blocked='旧方案未应用：这份早期方案缺少编辑基线，请按最新情况重新整理。';
   const operations=baseline?mergeChanges(snapshot.data,parsed.data.operations,baseline):parsed.data.operations;
   if(!blocked)warnings=changeWarnings(snapshot.data,operations).map(w=>w.message);
@@ -30,7 +33,7 @@ export function savedChat(snapshot:Snapshot,requestId:string,text:string,receipt
 }
 
 export async function pendingProposals(db:D1Database,user:string,snapshot:Snapshot,cursor?:{at:string;id:string}){
- const query='SELECT request_id,request_text,reply,proposal,work_revision,proposal_state,base_records,created_at,payload_version FROM chat_receipts WHERE owner = ? AND proposal_state = ? AND proposal IS NOT NULL'+(cursor?' AND (created_at < ? OR (created_at = ? AND request_id < ?))':'')+' ORDER BY created_at DESC,request_id DESC LIMIT 21';
+ const query='SELECT request_id,request_text,reply,proposal,work_revision,proposal_state,base_records,created_at,payload_version,protocol_version,state_reason,superseded_by FROM chat_receipts WHERE owner = ? AND proposal_state = ? AND proposal IS NOT NULL'+(cursor?' AND (created_at < ? OR (created_at = ? AND request_id < ?))':'')+' ORDER BY created_at DESC,request_id DESC LIMIT 21';
  const rows=(await db.prepare(query).bind(user,'pending',...(cursor?[cursor.at,cursor.at,cursor.id]:[])).all<Receipt&{request_id:string;created_at:string}>()).results;
  const page=await hydrateReceipts(db,user,rows.slice(0,20)),last=page.at(-1);
  const drafts=page.flatMap(r=>{const result=savedChat(snapshot,r.request_id,r.request_text,r);return result.draft?[{...result.draft,requestText:r.request_text,createdAt:r.created_at}]:[]});
@@ -39,8 +42,8 @@ export async function pendingProposals(db:D1Database,user:string,snapshot:Snapsh
 }
 
 export async function allPendingPlans(db:D1Database,user:string):Promise<ReviewablePlan[]>{
- const rows=await hydrateReceipts(db,user,(await db.prepare("SELECT request_id,request_text,reply,proposal,base_records,work_revision,payload_version FROM chat_receipts WHERE owner = ? AND proposal_state = 'pending' AND proposal IS NOT NULL ORDER BY created_at DESC,request_id DESC").bind(user).all<Receipt&{request_id:string}>()).results);
- return rows.flatMap(row=>{try{const plan=proposalSchema.parse(JSON.parse(row.proposal!));return [{...plan,id:row.request_id+'-apply',baseline:row.base_records?JSON.parse(row.base_records):undefined,workRevision:row.work_revision}]}catch{return []}});
+ const rows=await hydrateReceipts(db,user,(await db.prepare("SELECT request_id,request_text,reply,proposal,base_records,work_revision,payload_version,protocol_version FROM chat_receipts WHERE owner = ? AND proposal_state = 'pending' AND proposal IS NOT NULL ORDER BY created_at DESC,request_id DESC").bind(user).all<Receipt&{request_id:string}>()).results);
+ return rows.flatMap(row=>{try{const plan=proposalSchema.parse(JSON.parse(row.proposal!));return [{...plan,id:row.request_id+'-apply',requestText:row.request_text,protocolVersion:row.protocol_version,baseline:row.base_records?JSON.parse(row.base_records):undefined,workRevision:row.work_revision}]}catch{return []}});
 }
 export type ChatCursor={at:string;id:string};
 export async function chatHistory(db:D1Database,user:string,cursor?:ChatCursor){
@@ -64,14 +67,18 @@ export async function commitWorkspace(db:D1Database,user:string,current:Snapshot
 
 // Both statements run in one transaction. A unique token prevents a losing retry
 // from updating the workspace using another request's already-saved receipt.
-export async function commitChat(db:D1Database,user:string,current:Snapshot,requestId:string,text:string,reply:string,draft:Proposal|null,workRevision:number,baseline?:ChangeBaseline){
+export type ConversationCommit={memories?:ConversationMemory[];forgotten?:string[];transitions?:PlanTransition[];audit?:unknown};
+export async function commitChat(db:D1Database,user:string,current:Snapshot,requestId:string,text:string,reply:string,draft:Proposal|null,workRevision:number,baseline?:ChangeBaseline,conversation:ConversationCommit={}){
  const at=new Date().toISOString(),commitToken=crypto.randomUUID();
  const data=applyOperations(current.data,[{type:'message.add',data:{id:requestId+'-u',role:'user',content:text,at}},{type:'message.add',data:{id:requestId+'-a',role:'assistant',content:reply,at}}],requestId);
  const results=await db.batch([
   commitHeader(db,user,current,data,commitToken,' AND NOT EXISTS (SELECT 1 FROM chat_receipts WHERE owner=? AND request_id=?)',[user,requestId]),
   ...recordStatements(db,user,commitToken,current.data,data),
-  db.prepare(`INSERT INTO chat_receipts (owner,request_id,request_text,reply,proposal,work_revision,commit_token,created_at,base_records,sequence,payload_version) SELECT ?,?,?,?,?,?,?,?,?,?,1 WHERE ${commitGuard}`).bind(user,requestId,text,reply,draft?JSON.stringify({summary:draft.summary}):null,workRevision,commitToken,at,baseline?'parts':null,current.revision+1,user,commitToken),
-  ...chatPartStatements(db,user,requestId,commitToken,draft,baseline)
+  db.prepare(`INSERT INTO chat_receipts (owner,request_id,request_text,reply,proposal,work_revision,commit_token,created_at,base_records,sequence,payload_version,protocol_version,turn_context) SELECT ?,?,?,?,?,?,?,?,?,?,1,2,? WHERE ${commitGuard}`).bind(user,requestId,text,reply,draft?JSON.stringify({summary:draft.summary}):null,workRevision,commitToken,at,baseline?'parts':null,current.revision+1,conversation.audit?JSON.stringify(conversation.audit):null,user,commitToken),
+  ...chatPartStatements(db,user,requestId,commitToken,draft,baseline),
+  ...targetStatements(db,user,requestId,commitToken,draft?.operations||[]),
+  ...transitionStatements(db,user,commitToken,conversation.transitions||[]),
+  ...memoryStatements(db,user,commitToken,conversation.memories||[],conversation.forgotten||[]),
  ]);
  return results[0].meta.changes===1?{data,revision:current.revision+1}:null;
 }

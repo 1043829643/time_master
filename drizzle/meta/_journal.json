@@ -50,6 +50,13 @@
       "when": 1789535673071,
       "tag": "0006_ambitious_tarantula",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "6",
+      "when": 1789538921779,
+      "tag": "0007_empty_ironclad",
+      "breakpoints": true
     }
   ]
 }

@@ -1,6 +1,7 @@
 import {emptyData,validateData,type Data,type Snapshot} from './domain.ts';
 import {kinds,records,type ChangeBaseline} from './changes.ts';
 import {fingerprint} from './fingerprint.ts';
+import {transitionsForWrite,transitionStatements} from './proposal-lifecycle.ts';
 
 export const collections=['projects','tasks','blocks','contacts','resources','messages','history'] as const;
 type StoredRecord={kind:string;id:string;payload:string;position:number};
@@ -81,11 +82,13 @@ export async function commitRecords(db:D1Database,owner:string,current:Snapshot,
  let condition=' AND NOT EXISTS (SELECT 1 FROM operation_receipts WHERE owner=? AND operation_id=?)',args:unknown[]=[owner,operationId];
  if(applying){condition+=" AND EXISTS (SELECT 1 FROM chat_receipts WHERE owner=? AND request_id=? AND proposal_state='pending' AND proposal IS NOT NULL)";args.push(owner,operationId.slice(0,-6));}
  const effects=operationEffects(current.data,data);
+ const transitions=await transitionsForWrite(db,owner,current.data,data,effects,applying?operationId.slice(0,-6):undefined);
  const result=await db.batch([
   commitHeader(db,owner,current,data,token,condition,args),
   ...recordStatements(db,owner,token,current.data,data),
   db.prepare(`INSERT INTO operation_receipts(owner,operation_id,fingerprint,revision,created_at) SELECT ?,?,?,?,? WHERE ${commitGuard}`).bind(owner,operationId,hash,current.revision+1,new Date().toISOString(),owner,token),
   ...jsonChunks(effects).map(chunk=>db.prepare(`INSERT INTO operation_effects(owner,operation_id,kind,id,payload) SELECT ?,?,json_extract(value,'$.kind'),json_extract(value,'$.id'),json_extract(value,'$.value') FROM json_each(?) WHERE ${commitGuard}`).bind(owner,operationId,chunk,owner,token)),
+  ...transitionStatements(db,owner,token,transitions),
   ...(applying?[db.prepare(`UPDATE chat_receipts SET proposal_state='applied' WHERE owner=? AND request_id=? AND ${commitGuard}`).bind(owner,operationId.slice(0,-6),owner,token)]:[])
  ]);
  return result[0].meta.changes===1;

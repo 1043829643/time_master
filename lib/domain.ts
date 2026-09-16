@@ -4,7 +4,7 @@ export const day=z.string().regex(/^\d{4}-\d{2}-\d{2}$/).refine(v=>{const d=new 
 const status=z.enum(['todo','doing','waiting','done','paused']);
 export const projectSchema=z.object({id,name,goal:note,status:z.enum(['active','paused','done']).default('active'),start:day,end:day,color:z.enum(['green','blue','amber']).default('green')});
 export const taskSchema=z.object({id,projectId:id,name,shortName:z.string().max(20).default(''),description:note,start:day,end:day,status:status.default('todo'),owner:z.string().max(100).default('我'),hours:z.number().min(0).max(10000).default(1),dependencies:z.array(id).max(40).default([]),contactId:z.string().max(100).default(''),updatedAt:z.string().default(''),result:note});
-export const blockSchema=z.object({id,taskId:z.string().max(100).default(''),name,start:z.string().regex(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/),end:z.string().regex(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/),fixed:z.boolean().default(false),done:z.boolean().default(false)});
+export const blockSchema=z.object({id,contactId:z.string().max(100).optional(),taskId:z.string().max(100).default(''),name,start:z.string().regex(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/),end:z.string().regex(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/),fixed:z.boolean().default(false),done:z.boolean().default(false)});
 export const contactSchema=z.object({id,name,wechat:z.string().max(150).default(''),notes:note,roles:z.array(z.object({projectId:id,role:z.string().max(300)})).max(100).default([])});
 export const resourceSchema=z.object({id,projectId:id,name,device:z.string().max(160).default(''),path:z.string().max(2000),purpose:note});
 export const messageSchema=z.object({id,role:z.enum(['user','assistant']),content:z.string().max(16000),at:z.string()});
@@ -24,7 +24,7 @@ export function validateData(input:unknown):Data{
  for(const p of d.projects)if(p.start>p.end)throw new Error('项目结束日期不能早于开始日期。');
  for(const t of d.tasks){if(!projects.has(t.projectId))throw new Error('任务所属项目不存在。');if(t.start>t.end)throw new Error('任务结束日期不能早于开始日期。');if(t.contactId&&!contacts.has(t.contactId))throw new Error('关联联系人不存在。');for(const dep of t.dependencies)if(!tasks.has(dep)||dep===t.id)throw new Error('任务依赖不存在，或指向任务自身。');}
  const visited=new Set<string>(),visiting=new Set<string>();const visit=(key:string)=>{if(visiting.has(key))throw new Error('依赖形成循环，请检查前置任务。');if(visited.has(key))return;visiting.add(key);tasks.get(key)!.dependencies.forEach(visit);visiting.delete(key);visited.add(key);};d.tasks.forEach(t=>visit(t.id));
- for(const b of d.blocks){if(!day.safeParse(b.start.slice(0,10)).success||!day.safeParse(b.end.slice(0,10)).success||!/^([01]\d|2[0-3]):[0-5]\d$/.test(b.start.slice(11))||!/^([01]\d|2[0-3]):[0-5]\d$/.test(b.end.slice(11))||b.start>=b.end)throw new Error('日程的起止时间无效。');if(b.taskId&&!tasks.has(b.taskId))throw new Error('日程关联的任务不存在。');}
+ for(const b of d.blocks){if(!day.safeParse(b.start.slice(0,10)).success||!day.safeParse(b.end.slice(0,10)).success||!/^([01]\d|2[0-3]):[0-5]\d$/.test(b.start.slice(11))||!/^([01]\d|2[0-3]):[0-5]\d$/.test(b.end.slice(11))||b.start>=b.end)throw new Error('日程的起止时间无效。');if(b.contactId&&!contacts.has(b.contactId))throw new Error('日程关联的联系人不存在。');if(b.taskId&&!tasks.has(b.taskId))throw new Error('日程关联的任务不存在。');}
  for(const c of d.contacts)for(const r of c.roles)if(!projects.has(r.projectId))throw new Error('联系人关联的项目不存在。');
  for(const r of d.resources)if(!projects.has(r.projectId))throw new Error('工程所属项目不存在。');
  return d;
@@ -37,7 +37,7 @@ export function applyOperations(current:Data,raw:unknown,operationId:string,summ
  case 'project.delete':if(!op.id)throw new Error('缺少项目编号');d.tasks.filter(t=>t.projectId===op.id).forEach(t=>removeTask(t.id));d.projects=d.projects.filter(p=>p.id!==op.id);d.resources=d.resources.filter(r=>r.projectId!==op.id);d.contacts=d.contacts.map(c=>({...c,roles:c.roles.filter(r=>r.projectId!==op.id)}));break;
  case 'task.delete':if(!op.id)throw new Error('缺少任务编号');removeTask(op.id);break;
  case 'block.delete':d.blocks=d.blocks.filter(b=>b.id!==op.id);break;case 'resource.delete':d.resources=d.resources.filter(r=>r.id!==op.id);break;
- case 'contact.delete':d.contacts=d.contacts.filter(c=>c.id!==op.id);d.tasks=d.tasks.map(t=>t.contactId===op.id?{...t,contactId:''}:t);break;
+ case 'contact.delete':d.blocks=d.blocks.map(b=>b.contactId===op.id?{...b,contactId:''}:b);d.contacts=d.contacts.filter(c=>c.id!==op.id);d.tasks=d.tasks.map(t=>t.contactId===op.id?{...t,contactId:''}:t);break;
  case 'message.add':d.messages.push(messageSchema.parse(op.data));d.messages=d.messages.slice(-80);break;}}
  if(ops.some(op=>op.type!=='message.add')){for(const t of d.tasks){const p=d.projects.find(p=>p.id===t.projectId);if(p){if(t.start<p.start)p.start=t.start;if(t.end>p.end)p.end=t.end;}}d.workRevision=(d.workRevision||0)+1;d.history=[...d.history,{at:new Date().toISOString(),summary:summary.slice(0,300)}].slice(-80);}validateData(d);d.appliedIds=[...d.appliedIds,operationId].slice(-100);return d;
 }
