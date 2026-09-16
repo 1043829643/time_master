@@ -2,11 +2,12 @@ import {z} from 'zod';
 import {applyOperations,operationSchema,type Snapshot} from './domain.ts';
 import {mergeChanges,type ChangeBaseline} from './changes.ts';
 import {changeWarnings} from './planning.ts';
+import {pendingPlanWarnings,type ReviewablePlan} from './proposal-review.ts';
 
 export const proposalSchema=z.object({summary:z.string().min(1).max(300),operations:z.array(operationSchema).min(1).max(30)});
 export type Proposal=z.infer<typeof proposalSchema>;
 export type Receipt={request_text:string;reply:string;proposal:string|null;work_revision:number;proposal_state?:string;base_records?:string|null};
-export type Draft=Proposal&{id:string;revision:number;workRevision:number;requestText?:string;createdAt?:string;baseline?:ChangeBaseline;blocked?:string;warnings?:string[]};
+export type Draft=Proposal&{id:string;revision:number;workRevision:number;requestText?:string;createdAt?:string;baseline?:ChangeBaseline;blocked?:string;warnings?:string[];pendingWarnings?:string[]};
 
 export async function readChatReceipt(db:D1Database,user:string,requestId:string){
  return db.prepare('SELECT request_text,reply,proposal,work_revision,proposal_state,base_records FROM chat_receipts WHERE owner = ? AND request_id = ?').bind(user,requestId).first<Receipt>();
@@ -30,7 +31,20 @@ export async function pendingProposals(db:D1Database,user:string,snapshot:Snapsh
  const rows=(await db.prepare(query).bind(user,'pending',...(cursor?[cursor.at,cursor.at,cursor.id]:[])).all<Receipt&{request_id:string;created_at:string}>()).results;
  const page=rows.slice(0,20),last=page.at(-1);
  const drafts=page.flatMap(r=>{const result=savedChat(snapshot,r.request_id,r.request_text,r);return result.draft?[{...result.draft,requestText:r.request_text,createdAt:r.created_at}]:[]});
- return {drafts,nextCursor:rows.length>20&&last?{at:last.created_at,id:last.request_id}:null};
+ const all=await allPendingPlans(db,user),warnings=pendingPlanWarnings(snapshot.data,all,new Set(drafts.map(d=>d.id)));
+ return {drafts:drafts.map(d=>({...d,pendingWarnings:warnings[d.id]||[]})),nextCursor:rows.length>20&&last?{at:last.created_at,id:last.request_id}:null};
+}
+
+export async function allPendingPlans(db:D1Database,user:string):Promise<ReviewablePlan[]>{
+ const rows=(await db.prepare("SELECT request_id,proposal,base_records,work_revision FROM chat_receipts WHERE owner = ? AND proposal_state = 'pending' AND proposal IS NOT NULL ORDER BY created_at DESC,request_id DESC").bind(user).all<{request_id:string;proposal:string;base_records:string|null;work_revision:number}>()).results;
+ return rows.flatMap(row=>{try{const plan=proposalSchema.parse(JSON.parse(row.proposal));return [{...plan,id:row.request_id+'-apply',baseline:row.base_records?JSON.parse(row.base_records):undefined,workRevision:row.work_revision}]}catch{return []}});
+}
+export type ChatCursor={at:string;id:string};
+export async function chatHistory(db:D1Database,user:string,cursor?:ChatCursor){
+ const rows=(await db.prepare('SELECT request_id,request_text,reply,created_at FROM chat_receipts WHERE owner = ?'+(cursor?' AND (created_at < ? OR (created_at = ? AND request_id < ?))':'')+' ORDER BY created_at DESC,request_id DESC LIMIT 41').bind(user,...(cursor?[cursor.at,cursor.at,cursor.id]:[])).all<{request_id:string;request_text:string;reply:string;created_at:string}>()).results;
+ const page=rows.slice(0,40),last=page.at(-1);
+ const messages=page.reverse().flatMap(r=>[{id:r.request_id+'-u',role:'user' as const,content:r.request_text,at:r.created_at},{id:r.request_id+'-a',role:'assistant' as const,content:r.reply,at:r.created_at}]);
+ return {messages,nextCursor:rows.length>40&&last?{at:last.created_at,id:last.request_id}:null};
 }
 
 export async function commitWorkspace(db:D1Database,user:string,current:Snapshot,data:Snapshot['data'],operationId:string){

@@ -1,10 +1,19 @@
-import {baselineSchema,type ChangeBaseline,type Kind} from './changes.ts';
+import {baselineSchema,kinds,captureBaseline,type ChangeBaseline,type Kind} from './changes.ts';
+import {type Data} from './domain.ts';
 export type EditorDraft={version:1;kind:Kind;id:string;record:Record<string,any>|null;baseline:ChangeBaseline;deletionBaseline:ChangeBaseline;entries:[string,string][];attempt?:{fingerprint:string;id:string}};
 const prefix='time-master-editor-v1:';
 export function draftKey(item:{kind:string;id?:string;projectId?:string;taskId?:string;date?:string;status?:string}){return prefix+JSON.stringify([item.kind,item.id||'new',item.id?'':item.projectId||'',item.id?'':item.taskId||'',item.id||item.kind!=='block'?'':item.date||'',item.id?'':item.status||'']);}
-export function readDraft(key:string):EditorDraft|null{try{const d=JSON.parse(sessionStorage.getItem(key)||'null');return d?.version===1&&typeof d.id==='string'&&Array.isArray(d.entries)&&baselineSchema.safeParse(d.baseline).success?d:null}catch{return null}}
-export function writeDraft(key:string,draft:EditorDraft){try{sessionStorage.setItem(key,JSON.stringify(draft));return true}catch{return false}}
-export function clearDraft(key:string){try{sessionStorage.removeItem(key)}catch{}}
+export function readDraft(key:string):EditorDraft|null{try{const d=JSON.parse(sessionStorage.getItem(key)||'null');return key.startsWith(prefix)&&d?.version===1&&kinds.includes(d.kind)&&typeof d.id==='string'&&Array.isArray(d.entries)&&d.entries.every((e:unknown)=>Array.isArray(e)&&e.length===2&&e.every(v=>typeof v==='string'))&&baselineSchema.safeParse(d.baseline).success?d:null}catch{return null}}
+function changed(){if(typeof window!=='undefined')window.dispatchEvent(new Event('time-master-drafts-changed'));}
+export function writeDraft(key:string,draft:EditorDraft){try{sessionStorage.setItem(key,JSON.stringify(draft));changed();return true}catch{return false}}
+export function clearDraft(key:string){try{sessionStorage.removeItem(key);changed()}catch{}}
+export function listDrafts(){const drafts:{key:string;draft:EditorDraft}[]=[];try{for(let i=0;i<sessionStorage.length;i++){const key=sessionStorage.key(i)!;if(!key.startsWith(prefix))continue;const draft=readDraft(key);if(draft?.entries.length)drafts.push({key,draft});}}catch{}return drafts;}
+export function draftAsNew(draft:EditorDraft,data:Data,newId=crypto.randomUUID()):EditorDraft{
+ const entries=draft.entries.filter(([key,value])=>key!=='id'&&(key!=='dependencies'||data.tasks.some(t=>t.id===value))&&(!key.startsWith('role-')||data.projects.some(p=>key==='role-project-'+p.id||key==='role-'+p.id))).map(([key,value]):[string,string]=>{
+  if(key==='projectId'&&!data.projects.some(p=>p.id===value)||key==='contactId'&&!data.contacts.some(c=>c.id===value)||key==='taskId'&&!data.tasks.some(t=>t.id===value))return [key,''];return [key,value];
+ });
+ return {...draft,id:newId,record:null,baseline:captureBaseline(data,[{type:draft.kind+'.save' as any,data:{id:newId}}]),deletionBaseline:{records:[],deletions:{}},entries,attempt:undefined};
+}
 export function formEntries(form:HTMLFormElement):[string,string][]{return [...new FormData(form).entries()].map(([key,value])=>[key,String(value)]);}
 export function restoreEntries(form:HTMLFormElement,entries:[string,string][]){
  for(const el of Array.from(form.elements)){

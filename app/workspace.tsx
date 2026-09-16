@@ -1,6 +1,9 @@
 'use client';
 import {useCallback,useEffect,useRef,useState} from 'react';
 import {useWorkspace} from './use-workspace';
+import DraftLibrary from './draft-library';
+import BackupRestore from './backup-restore';
+import {exportBackup} from '@/lib/backup';
 import {LayoutGrid,CalendarDays,Workflow,Users,FolderOpen,Plus,Search,AudioLines,ArrowUpRight,RefreshCw,Download,Copy,Monitor,Clock,Leaf,Menu,X,AlertCircle,CheckCircle2} from 'lucide-react';
 import {localDay,statusLabels,emptyData,type Snapshot,type Operation} from '@/lib/domain';
 import {demoOperations} from '@/lib/demo';
@@ -19,11 +22,11 @@ export default function Workspace(){
  const data=snapshot.data,today=localDay();
  useEffect(()=>{if(window.innerWidth<1200)setAgentOpen(false)},[]);
  const closeEditor=useCallback(()=>setEditor(null),[]);
- const open=(item:EditItem)=>{if(!loaded)return;if((item.kind==='task'||item.kind==='resource')&&!data.projects.length){notify('先创建一个项目，再添加事项或工程位置。');setEditor({kind:'project'});return}setEditor({...item})};
+ const open=(item:EditItem)=>{if(!loaded)return;if(!item.draftKey&&(item.kind==='task'||item.kind==='resource')&&!data.projects.length){notify('先创建一个项目，再添加事项或工程位置。');setEditor({kind:'project'});return}setEditor({...item})};
  useWorkspaceTools(snapshot,open);
  const changeView=(id:View)=>{setView(id);setFilter('');setMobileNav(false)};
  async function demo(){if(data.projects.length){notify('示例仅可加入空工作空间。',true);return}await save(demoOperations(),'载入示例项目，可随时编辑或删除');}
- function backup(){const blob=new Blob([JSON.stringify({exportedAt:new Date().toISOString(),timezone:'Asia/Shanghai',data},null,2)],{type:'application/json'}),url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download='时间管理大师-'+today+'.json';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);}
+ function backup(){const blob=new Blob([JSON.stringify(exportBackup(data),null,2)],{type:'application/json'}),url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download='时间管理大师-'+today+'.json';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);}
  async function copy(value:string){try{await navigator.clipboard.writeText(value);notify('已复制到剪贴板')}catch{notify('复制失败，请手动选中并复制。',true)}}
  const active=data.projects.filter(p=>p.status==='active').length,doing=data.tasks.filter(t=>t.status==='doing').length,waiting=data.tasks.filter(t=>t.status==='waiting').length,done=data.tasks.filter(t=>t.status==='done').length;
  const matching=(s:string)=>s.toLowerCase().includes(filter.toLowerCase());
@@ -32,6 +35,7 @@ export default function Workspace(){
  return <>{dialog}<div className={'app-shell '+(agentOpen?'with-agent':'')}><aside className={'sidebar '+(mobileNav?'mobile-open':'')}><a href="#" className="brand" onClick={e=>{e.preventDefault();changeView('projects')}}><span className="brand-mark"><Leaf size={23}/></span><span>时间管理大师<small>MAKE ROOM FOR WHAT MATTERS</small></span></a><div className="workspace-label"><span className="avatar">我</span><div><strong>我的工作空间</strong><small>安静地，把事情做好</small></div><button className="mobile-only icon-button" aria-label="关闭导航" onClick={()=>setMobileNav(false)}><X size={16}/></button></div><span className="nav-label">工作台</span><nav>{nav.map(n=><button key={n.id} className={view===n.id?'active':''} onClick={()=>changeView(n.id)}><n.icon size={18}/>{n.label}{n.id==='projects'&&data.projects.length>0&&<span>{data.projects.length}</span>}</button>)}</nav><div className="sidebar-note"><div className="tiny-orbit"/><p>有条理地前进，<br/>也可以从容一点。</p><small>{new Date(today+'T12:00:00').toLocaleDateString('zh-CN',{month:'long',day:'numeric',weekday:'long'})}</small></div><div className="sidebar-bottom"><button onClick={backup} disabled={!loaded} title="导出工作空间备份"><Download size={16}/>导出数据</button><span className={syncState==='offline'||syncState==='error'?'sync-warning':''} title={lastSynced?'上次同步 '+lastSynced:''}><i className={syncState==='synced'?'online-dot':'offline-dot'}/>{busy?'正在保存':syncState==='offline'?'当前离线 · 数据待同步':syncState==='error'?'同步未完成':loaded?'已同步 · '+lastSynced:'等待连接'}</span></div></aside>
  <div className="main-shell"><header className="topbar"><div className="row"><button className="mobile-only icon-button" onClick={()=>setMobileNav(true)} aria-label="打开导航"><Menu size={20}/></button><span className="breadcrumb">工作台 <span>/</span> <strong>{heading[0]}</strong></span></div><div className="top-actions"><button className="icon-button" aria-label="刷新数据" disabled={loading||busy} onClick={reload}><RefreshCw size={16} className={loading?'spin':''}/></button><span className="timezone">北京时间</span><button className={'agent-toggle '+(agentOpen?'active':'')} onClick={()=>agentOpen?closeAssistant.current():setAgentOpen(true)}><AudioLines size={17}/><span>时间伙伴</span></button></div></header>
  <main><div className="page-heading"><div><div className="eyebrow">{view==='projects'?'A LITTLE CLARITY, EVERY DAY':'YOUR PERSONAL WORKSPACE'}</div><h1>{heading[0]}<span className="heading-dot">.</span></h1><p>{heading[1]}</p></div><button className="primary" disabled={!loaded||busy} onClick={()=>open(newItem)}><Plus size={17}/>{view==='projects'?'新建项目':view==='today'?'添加日程':view==='flow'?'添加事项':view==='contacts'?'添加联系人':'添加位置'}</button></div>
+ {loaded&&<div className="workspace-recovery"><DraftLibrary open={open}/><BackupRestore receive={receive} notify={notify} disabled={busy}/></div>}
  {notice&&<div className={'notice '+(notice.error?'error':'')} role={notice.error?'alert':'status'}>{notice.error?<AlertCircle size={17}/>:<CheckCircle2 size={17}/>}<span>{notice.text}</span><button className="icon-button" onClick={()=>setNotice(null)} aria-label="关闭提示"><X size={15}/></button></div>}
  {!loaded?<div className="loading-state"><Leaf size={30}/><h3>{loading?'正在打开你的工作空间…':'工作空间暂时无法连接'}</h3><p>{loading?'项目和日程正在路上。':'点击右上方刷新，重新读取已保存的数据。'}</p></div>:<>
  {(view==='projects'||view==='flow')&&<div className="stats"><div><span>推进中的项目</span><strong>{String(active).padStart(2,'0')}<small>个项目</small></strong></div><div><span><i className="green-dot"/>正在推进</span><strong>{String(doing).padStart(2,'0')}<small>件事</small></strong></div><div><span><i className="amber-dot"/>等待跟进</span><strong>{String(waiting).padStart(2,'0')}<small>件事</small></strong></div><div><span>已经完成</span><strong>{String(done).padStart(2,'0')}<small>/ {data.tasks.length} 件事</small></strong></div></div>}
@@ -44,7 +48,7 @@ export default function Workspace(){
  {data.history.length>0&&view==='projects'&&<div className="recent-updates"><span>最近推进</span>{data.history.slice(-3).reverse().map((h,i)=><div key={i}><i/>{h.summary}<small>{new Date(h.at).toLocaleString('zh-CN',{timeZone:'Asia/Shanghai',month:'numeric',day:'numeric',hour:'2-digit',minute:'2-digit'})}</small></div>)}</div>}
  </>}</main><footer className="app-footer"><span>时间管理大师</span><span>把时间留给值得的事。</span></footer></div>
  {loaded&&<Assistant visible={agentOpen} closeRequest={closeAssistant} snapshot={snapshot} receive={receive} save={save} globalBusy={busy} close={()=>setAgentOpen(false)}/>}
- {editor&&<Editor key={editor.kind+(editor.id||'new')} item={editor} data={data} busy={busy} close={closeEditor} save={save}/>}
+ {editor&&<Editor key={editor.draftKey||editor.kind+(editor.id||'new')} item={editor} data={data} busy={busy} close={closeEditor} save={save}/>}
  </div></>;
 }
 function SmallEmpty({title,text,onClick}:{title:string;text:string;onClick:()=>void}){return <div className="small-empty"><FolderOpen size={30}/><h3>{title}</h3><p>{text}</p><button className="secondary" onClick={onClick}><Plus size={15}/>添加记录</button></div>}

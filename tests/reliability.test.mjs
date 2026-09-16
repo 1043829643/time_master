@@ -6,6 +6,9 @@ import {emptyData,applyOperations,validateData} from '../lib/domain.ts';
 import {commitChat,readChatReceipt,savedChat,pendingProposals,commitWorkspace} from '../lib/chat-state.ts';
 import {requestJson,ClientError} from '../lib/api-client.ts';
 import {captureBaseline,mergeChanges} from '../lib/changes.ts';
+import {chatHistory} from '../lib/chat-state.ts';
+import {commitRestore,readRestore} from '../lib/restore-state.ts';
+import {parseBackup,restorePlan} from '../lib/backup.ts';
 
 function database(){
  const sql=new DatabaseSync(':memory:');
@@ -19,6 +22,27 @@ function database(){
  const update=(data)=>sql.prepare('UPDATE workspaces SET payload=?,revision=revision+1 WHERE owner=?').run(JSON.stringify(data),'owner');
  return {sql,db,snapshot,update};
 }
+
+test('大备份原子提交，响应丢失后回执可读，重试不重写且用户隔离',async()=>{
+ const {sql,db,snapshot}=database(),source=emptyData();source.blocks=Array.from({length:90},(_,i)=>({id:'b'+i,name:'备份'+i,start:'2026-09-18T10:00',end:'2026-09-18T11:00',taskId:'',done:false,fixed:false}));
+ const before=snapshot(),data=restorePlan(before.data,parseBackup({data:source}),'copies','restore-test').data;assert.equal(await commitRestore(db,'owner',before,data,'restore-test','hash'),true);assert.equal(snapshot().data.blocks.length,90);assert.equal(await commitRestore(db,'owner',snapshot(),data,'restore-test','hash'),false);assert.equal(snapshot().revision,1);assert.equal((await readRestore(db,'owner','restore-test')).fingerprint,'hash');assert.equal(await readRestore(db,'other','restore-test'),null);sql.close();
+});
+test('恢复 CAS 失败不留下回执；聊天更新后重读保留最新消息',async()=>{
+ const {sql,db,snapshot}=database(),before=snapshot();await commitChat(db,'owner',before,'fresh-chat','新问题','新回答',null,0);assert.equal(await commitRestore(db,'owner',before,before.data,'restore-race','hash'),false);assert.equal(await readRestore(db,'owner','restore-race'),null);
+ const latest=snapshot(),source=parseBackup({data:applyOperations(emptyData(),[{type:'block.save',data:{id:'b',name:'恢复日程',start:'2026-09-18T10:00',end:'2026-09-18T11:00'}}],'seed')});const data=restorePlan(latest.data,source,'missing','restore-race').data;assert.equal(await commitRestore(db,'owner',latest,data,'restore-race','hash'),true);assert.equal(snapshot().data.messages.length,2);assert.equal(snapshot().data.blocks.length,1);sql.close();
+});
+test('恢复事务后半段失败会回滚所有记录及回执',async()=>{
+ const {sql,db,snapshot}=database();sql.exec("CREATE TRIGGER fail_restore BEFORE UPDATE ON workspaces BEGIN SELECT RAISE(ABORT,'simulated restore'); END");await assert.rejects(commitRestore(db,'owner',snapshot(),emptyData(),'rollback-restore','hash'),/simulated restore/);assert.equal(await readRestore(db,'owner','rollback-restore'),null);assert.equal(snapshot().revision,0);sql.close();
+});
+test('同一毫秒85轮聊天跨三页无遗漏，所有方案状态可读且用户隔离',async()=>{
+ const {sql,db}=database(),insert=sql.prepare('INSERT INTO chat_receipts(owner,request_id,request_text,reply,proposal,work_revision,commit_token,created_at,proposal_state) VALUES (?,?,?,?,NULL,0,?,?,?)');
+ for(let i=0;i<85;i++)insert.run('owner','history-'+String(i).padStart(3,'0'),'问题'+i,'回答'+i,'token'+i,'2026-09-16T00:00:00.000Z',['pending','applied','dismissed'][i%3]);
+ const a=await chatHistory(db,'owner'),b=await chatHistory(db,'owner',a.nextCursor),c=await chatHistory(db,'owner',b.nextCursor),messages=[...a.messages,...b.messages,...c.messages];assert.deepEqual([a.messages.length,b.messages.length,c.messages.length],[80,80,10]);assert.equal(c.nextCursor,null);assert.equal(new Set(messages.map(m=>m.id)).size,170);for(let i=0;i<messages.length;i+=2){assert.equal(messages[i].role,'user');assert.equal(messages[i+1].role,'assistant');}assert.equal((await chatHistory(db,'other')).messages.length,0);sql.close();
+});
+test('待确认第一页也能检测第21份的冲突，放弃后重新读取立即消失',async()=>{
+ const {sql,db,snapshot}=database();for(let i=0;i<21;i++){const id='cross-page-'+String(i).padStart(2,'0'),p={summary:'方案'+i,operations:[{type:'block.save',data:{id,name:id,start:i===0||i===20?'2026-09-18T10:00':'2026-10-'+String(i).padStart(2,'0')+'T10:00',end:i===0||i===20?'2026-09-18T11:00':'2026-10-'+String(i).padStart(2,'0')+'T11:00'}}]};await commitChat(db,'owner',snapshot(),id,'安排','方案',p,0,captureBaseline(snapshot().data,p.operations));}
+ sql.exec("UPDATE chat_receipts SET created_at='2026-09-16T00:00:00.000Z'");let page=await pendingProposals(db,'owner',snapshot());assert.equal(page.drafts.length,20);assert.ok(page.drafts.find(d=>d.id==='cross-page-20-apply').pendingWarnings.length);sql.exec("UPDATE chat_receipts SET proposal_state='dismissed' WHERE request_id='cross-page-00'");page=await pendingProposals(db,'owner',snapshot());assert.deepEqual(page.drafts.find(d=>d.id==='cross-page-20-apply').pendingWarnings,[]);sql.close();
+});
 test('新版方案保留原始基线，两份独立方案连续应用与刷新恢复',async()=>{
  const {sql,db,snapshot}=database();const one={summary:'甲',operations:[{type:'block.save',data:{id:'one',name:'甲',start:'2026-09-18T10:00',end:'2026-09-18T11:00'}}]},two={summary:'乙',operations:[{type:'block.save',data:{id:'two',name:'乙',start:'2026-09-19T10:00',end:'2026-09-19T11:00'}}]};const original=snapshot();
  await commitChat(db,'owner',snapshot(),'record-one','甲','方案',one,0,captureBaseline(original.data,one.operations));await commitChat(db,'owner',snapshot(),'record-two','乙','方案',two,0,captureBaseline(original.data,two.operations));
