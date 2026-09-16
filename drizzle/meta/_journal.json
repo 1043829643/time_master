@@ -15,6 +15,13 @@
       "when": 1789443434640,
       "tag": "0001_oval_trauma",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1789525918694,
+      "tag": "0002_harsh_zuras",
+      "breakpoints": true
     }
   ]
 }

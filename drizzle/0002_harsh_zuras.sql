@@ -1,0 +1,2 @@
+ALTER TABLE `chat_receipts` ADD `proposal_state` text DEFAULT 'pending' NOT NULL;--> statement-breakpoint
+CREATE INDEX `chat_receipts_pending` ON `chat_receipts` (`owner`,`proposal_state`,`created_at`);

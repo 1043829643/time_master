@@ -1,4 +1,5 @@
 import {env} from 'cloudflare:workers';
+import {commitWorkspace,readChatReceipt} from './chat-state';
 import {getChatGPTUser} from '@/app/chatgpt-auth';
 import {applyOperations,emptyData,validateData,type Data,type Snapshot} from './domain';
 export class ApiError extends Error{constructor(message:string,public status=400){super(message)}}
@@ -10,11 +11,11 @@ export async function readWorkspace(user:string):Promise<Snapshot>{const db=bind
 export async function writeWorkspace(user:string,base:number,ops:unknown,operationId:string,summary:string,workRevision?:number):Promise<Snapshot>{
  for(let attempt=0;attempt<4;attempt++){
   const current=await readWorkspace(user);if(current.data.appliedIds.includes(operationId))return current;
+  if(operationId.endsWith('-apply')){const receipt=await readChatReceipt(binding(),user,operationId.slice(0,-6));if(receipt?.proposal_state==='applied')return await readWorkspace(user);if(receipt?.proposal_state==='dismissed')throw new ApiError('这个方案已放弃，请重新安排。',409);}
   // Conversation-only updates must not invalidate an open project editor or a proposal.
   if(workRevision===undefined?current.revision!==base:current.data.workRevision!==workRevision)throw new ApiError('项目或日程已有其他修改。你的输入仍保留，请同步最新数据后核对。',409);
   const data=applyOperations(current.data,ops,operationId,summary);
-  const result=await binding().prepare('UPDATE workspaces SET payload = ?, revision = revision + 1, updated_at = ? WHERE owner = ? AND revision = ?').bind(JSON.stringify(data),new Date().toISOString(),user,current.revision).run();
-  if(result.meta.changes===1)return {data,revision:current.revision+1};
+  if(await commitWorkspace(binding(),user,current,data,operationId))return {data,revision:current.revision+1};
  }
  throw new ApiError('其他页面正在保存，请稍后重试；本次输入仍保留。',409);
 }

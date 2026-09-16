@@ -3,17 +3,34 @@ import {applyOperations,operationSchema,type Snapshot} from './domain.ts';
 
 export const proposalSchema=z.object({summary:z.string().min(1).max(300),operations:z.array(operationSchema).min(1).max(30)});
 export type Proposal=z.infer<typeof proposalSchema>;
-export type Receipt={request_text:string;reply:string;proposal:string|null;work_revision:number};
+export type Receipt={request_text:string;reply:string;proposal:string|null;work_revision:number;proposal_state?:string};
+export type Draft=Proposal&{id:string;revision:number;workRevision:number;requestText?:string;createdAt?:string};
 
 export async function readChatReceipt(db:D1Database,user:string,requestId:string){
- return db.prepare('SELECT request_text,reply,proposal,work_revision FROM chat_receipts WHERE owner = ? AND request_id = ?').bind(user,requestId).first<Receipt>();
+ return db.prepare('SELECT request_text,reply,proposal,work_revision,proposal_state FROM chat_receipts WHERE owner = ? AND request_id = ?').bind(user,requestId).first<Receipt>();
 }
 export function savedChat(snapshot:Snapshot,requestId:string,text:string,receipt:Receipt){
  if(receipt.request_text!==text)throw new Error('这次重试的内容已改变，请重新发送。');
  const parsed=proposalSchema.safeParse(receipt.proposal?JSON.parse(receipt.proposal):null);
- const alreadyApplied=snapshot.data.appliedIds.includes(requestId+'-apply');
+ const alreadyApplied=snapshot.data.appliedIds.includes(requestId+'-apply')||receipt.proposal_state==='applied'||receipt.proposal_state==='dismissed';
  const stale=!!receipt.proposal&&receipt.work_revision!==snapshot.data.workRevision&&!alreadyApplied;
  return {snapshot,reply:receipt.reply,draft:parsed.success&&!alreadyApplied?{...parsed.data,revision:snapshot.revision,workRevision:receipt.work_revision,id:requestId+'-apply'}:null,notice:stale?'项目或日程已有更新，旧方案未应用。最新数据已同步，请让时间伙伴重新安排。':undefined};
+}
+
+export async function pendingProposals(db:D1Database,user:string,snapshot:Snapshot,cursor?:{at:string;id:string}){
+ const query='SELECT request_id,request_text,reply,proposal,work_revision,proposal_state,created_at FROM chat_receipts WHERE owner = ? AND proposal_state = ? AND proposal IS NOT NULL'+(cursor?' AND (created_at < ? OR (created_at = ? AND request_id < ?))':'')+' ORDER BY created_at DESC,request_id DESC LIMIT 21';
+ const rows=(await db.prepare(query).bind(user,'pending',...(cursor?[cursor.at,cursor.at,cursor.id]:[])).all<Receipt&{request_id:string;created_at:string}>()).results;
+ const page=rows.slice(0,20),last=page.at(-1);
+ const drafts=page.flatMap(r=>{const result=savedChat(snapshot,r.request_id,r.request_text,r);return result.draft?[{...result.draft,requestText:r.request_text,createdAt:r.created_at}]:[]});
+ return {drafts,nextCursor:rows.length>20&&last?{at:last.created_at,id:last.request_id}:null};
+}
+
+export async function commitWorkspace(db:D1Database,user:string,current:Snapshot,data:Snapshot['data'],operationId:string){
+ const applying=operationId.endsWith('-apply');
+ const condition=applying?" AND NOT EXISTS (SELECT 1 FROM chat_receipts WHERE owner = ? AND request_id = ? AND proposal_state != 'pending')":'';
+ const statements=[db.prepare('UPDATE workspaces SET payload = ?, revision = revision + 1, updated_at = ? WHERE owner = ? AND revision = ?'+condition).bind(JSON.stringify(data),new Date().toISOString(),user,current.revision,...(applying?[user,operationId.slice(0,-6)]:[]))];
+ if(operationId.endsWith('-apply'))statements.push(db.prepare("UPDATE chat_receipts SET proposal_state = 'applied' WHERE owner = ? AND request_id = ? AND EXISTS (SELECT 1 FROM workspaces,json_each(workspaces.payload,'$.appliedIds') WHERE workspaces.owner = ? AND json_each.value = ?)").bind(user,operationId.slice(0,-6),user,operationId));
+ const results=await db.batch(statements);return results[0].meta.changes===1;
 }
 
 // Both statements run in one transaction. A unique token prevents a losing retry

@@ -1,16 +1,16 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {DatabaseSync} from 'node:sqlite';
-import {readFileSync} from 'node:fs';
+import {readFileSync,readdirSync} from 'node:fs';
 import {emptyData,applyOperations,validateData} from '../lib/domain.ts';
-import {commitChat,readChatReceipt,savedChat} from '../lib/chat-state.ts';
+import {commitChat,readChatReceipt,savedChat,pendingProposals,commitWorkspace} from '../lib/chat-state.ts';
 import {requestJson,ClientError} from '../lib/api-client.ts';
 
 function database(){
  const sql=new DatabaseSync(':memory:');
- for(const migration of ['0000_daily_patch.sql','0001_oval_trauma.sql'])sql.exec(readFileSync(new URL('../drizzle/'+migration,import.meta.url),'utf8'));
+ for(const migration of readdirSync(new URL('../drizzle/',import.meta.url)).filter(f=>f.endsWith('.sql')).sort())sql.exec(readFileSync(new URL('../drizzle/'+migration,import.meta.url),'utf8'));
  const db={
-  prepare(query){return {bind(...args){const stmt=sql.prepare(query);return {first:async()=>stmt.get(...args)??null,execute:()=>({meta:{changes:stmt.run(...args).changes}})}}};},
+  prepare(query){return {bind(...args){const stmt=sql.prepare(query);return {first:async()=>stmt.get(...args)??null,all:async()=>({results:stmt.all(...args)}),execute:()=>({meta:{changes:stmt.run(...args).changes}})}}};},
   async batch(statements){sql.exec('BEGIN');try{const results=statements.map(s=>s.execute());sql.exec('COMMIT');return results}catch(e){sql.exec('ROLLBACK');throw e}}
  };
  sql.prepare('INSERT INTO workspaces VALUES (?,?,0,?)').run('owner',JSON.stringify(emptyData()),new Date().toISOString());
@@ -78,4 +78,36 @@ test('持续网络错误给出中文；401、409 和 HTML 登录页不盲目重�
 test('显式取消请求时不重试',async(t)=>{
  let calls=0;t.mock.method(globalThis,'fetch',async(_url,init)=>{calls++;return new Promise((_,reject)=>init.signal.addEventListener('abort',()=>reject(new DOMException('aborted','AbortError')),{once:true}))});
  const controller=new AbortController();const pending=requestJson('/api/test',undefined,{signal:controller.signal});controller.abort();await assert.rejects(pending,e=>e.name==='AbortError');assert.equal(calls,1);
+});
+
+
+test('方案跨刷新/闲聊恢复，放弃后不可恢复且用户隔离',async()=>{
+ const {sql,db,snapshot}=database();await commitChat(db,'owner',snapshot(),'persist-1','请安排','方案',proposal,0);
+ await commitChat(db,'owner',snapshot(),'persist-2','谢谢','不客气',null,0);
+ assert.equal((await pendingProposals(db,'owner',snapshot())).drafts.length,1);
+ assert.equal((await pendingProposals(db,'other',snapshot())).drafts.length,0);
+ sql.prepare("UPDATE chat_receipts SET proposal_state='dismissed' WHERE request_id=?").run('persist-1');
+ assert.equal((await pendingProposals(db,'owner',snapshot())).drafts.length,0);
+ assert.equal(savedChat(snapshot(),'persist-1','请安排',await readChatReceipt(db,'owner','persist-1')).draft,null);sql.close();
+});
+test('方案应用与状态原子保存，裁剪幂等列表后仍不复活',async()=>{
+ const {sql,db,snapshot,update}=database();await commitChat(db,'owner',snapshot(),'persist-3','安排','方案',proposal,0);
+ const current=snapshot(),next=applyOperations(current.data,proposal.operations,'persist-3-apply');
+ assert.equal(await commitWorkspace(db,'owner',current,next,'persist-3-apply'),true);
+ const trimmed=snapshot().data;trimmed.appliedIds=[];update(trimmed);
+ assert.equal((await readChatReceipt(db,'owner','persist-3')).proposal_state,'applied');
+ assert.equal((await pendingProposals(db,'owner',snapshot())).drafts.length,0);sql.close();
+});
+test('放弃与应用竞争、CAS失败都不会提交错误的方案状态',async()=>{
+ const {sql,db,snapshot,update}=database();await commitChat(db,'owner',snapshot(),'persist-4','安排','方案',proposal,0);
+ const old=snapshot(),next=applyOperations(old.data,proposal.operations,'persist-4-apply');
+ update(old.data);assert.equal(await commitWorkspace(db,'owner',old,next,'persist-4-apply'),false);
+ assert.equal((await readChatReceipt(db,'owner','persist-4')).proposal_state,'pending');
+ sql.prepare("UPDATE chat_receipts SET proposal_state='dismissed' WHERE request_id=?").run('persist-4');
+ assert.equal(await commitWorkspace(db,'owner',snapshot(),next,'persist-4-apply'),false);assert.equal(snapshot().data.blocks.length,0);sql.close();
+});
+test('方案历史超过20件可继续翻页且保留旧业务版本',async()=>{
+ const {sql,db,snapshot}=database();for(let i=0;i<23;i++)await commitChat(db,'owner',snapshot(),'page-'+i,'安排','方案',proposal,0);
+ const one=await pendingProposals(db,'owner',snapshot()),two=await pendingProposals(db,'owner',snapshot(),one.nextCursor);
+ assert.equal(one.drafts.length,20);assert.equal(two.drafts.length,3);assert.equal(new Set([...one.drafts,...two.drafts].map(d=>d.id)).size,23);assert.equal(two.nextCursor,null);sql.close();
 });
