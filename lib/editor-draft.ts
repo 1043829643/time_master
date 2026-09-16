@@ -1,6 +1,19 @@
-import {baselineSchema,kinds,captureBaseline,type ChangeBaseline,type Kind} from './changes.ts';
-import {type Data} from './domain.ts';
-export type EditorDraft={version:1;kind:Kind;id:string;record:Record<string,any>|null;baseline:ChangeBaseline;deletionBaseline:ChangeBaseline;entries:[string,string][];attempt?:{fingerprint:string;id:string}};
+import {baselineSchema,kinds,captureBaseline,stable,type ChangeBaseline,type Kind} from './changes.ts';
+import {type Data,type Operation} from './domain.ts';
+import {type OperationReceipt} from './workspace-storage.ts';
+export type EditorDraft={version:1;kind:Kind;id:string;record:Record<string,any>|null;baseline:ChangeBaseline;deletionBaseline:ChangeBaseline;entries:[string,string][];attempt?:{fingerprint:string;id:string;operations?:Operation[];baseline?:ChangeBaseline;summary?:string}};
+export function acknowledgeDraft(draft:EditorDraft,receipt:OperationReceipt,data:Data):EditorDraft {
+ if(receipt.status!=='applied')return {...draft,attempt:undefined};
+ const effect=receipt.records.find(r=>r.kind===draft.kind&&r.id===draft.id);
+ if(!effect)return {...draft,attempt:undefined};
+ return {...draft,record:effect.value,baseline:{records:[effect],deletions:{}},deletionBaseline:captureBaseline(data,[{type:draft.kind+'.delete' as Operation['type'],id:draft.id}]),attempt:undefined};
+}
+export function rebaseSubmittedOperations(previous:Operation[],wanted:Operation[],receipt:OperationReceipt):Operation[]{
+ if(receipt.status!=='applied')return wanted;
+ return wanted.map(op=>{if(!op.type.endsWith('.save'))return op;const value=op.data as Record<string,unknown>,prior=previous.find(p=>p.type===op.type&&(p.data as any)?.id===value.id)?.data as Record<string,unknown>|undefined,effect=receipt.records.find(r=>r.kind===op.type.split('.')[0]&&r.id===value.id)?.value;
+  if(!prior||!effect)return op;const merged={...effect};for(const [field,content] of Object.entries(value))if(field!=='updatedAt'&&stable(content)!==stable(prior[field]))merged[field]=content;return {...op,data:merged};
+ });
+}
 const prefix='time-master-editor-v1:';
 export function draftKey(item:{kind:string;id?:string;projectId?:string;taskId?:string;date?:string;status?:string}){return prefix+JSON.stringify([item.kind,item.id||'new',item.id?'':item.projectId||'',item.id?'':item.taskId||'',item.id||item.kind!=='block'?'':item.date||'',item.id?'':item.status||'']);}
 export function readDraft(key:string):EditorDraft|null{try{const d=JSON.parse(sessionStorage.getItem(key)||'null');return key.startsWith(prefix)&&d?.version===1&&kinds.includes(d.kind)&&typeof d.id==='string'&&Array.isArray(d.entries)&&d.entries.every((e:unknown)=>Array.isArray(e)&&e.length===2&&e.every(v=>typeof v==='string'))&&baselineSchema.safeParse(d.baseline).success?d:null}catch{return null}}

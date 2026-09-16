@@ -10,18 +10,7 @@ import {chatHistory} from '../lib/chat-state.ts';
 import {commitRestore,readRestore} from '../lib/restore-state.ts';
 import {parseBackup,restorePlan} from '../lib/backup.ts';
 
-function database(){
- const sql=new DatabaseSync(':memory:');
- for(const migration of readdirSync(new URL('../drizzle/',import.meta.url)).filter(f=>f.endsWith('.sql')).sort())sql.exec(readFileSync(new URL('../drizzle/'+migration,import.meta.url),'utf8'));
- const db={
-  prepare(query){return {bind(...args){const stmt=sql.prepare(query);return {first:async()=>stmt.get(...args)??null,all:async()=>({results:stmt.all(...args)}),execute:()=>({meta:{changes:stmt.run(...args).changes}})}}};},
-  async batch(statements){sql.exec('BEGIN');try{const results=statements.map(s=>s.execute());sql.exec('COMMIT');return results}catch(e){sql.exec('ROLLBACK');throw e}}
- };
- sql.prepare('INSERT INTO workspaces VALUES (?,?,0,?)').run('owner',JSON.stringify(emptyData()),new Date().toISOString());
- const snapshot=()=>{const row=sql.prepare('SELECT * FROM workspaces WHERE owner=?').get('owner');return {data:validateData(JSON.parse(row.payload)),revision:row.revision}};
- const update=(data)=>sql.prepare('UPDATE workspaces SET payload=?,revision=revision+1 WHERE owner=?').run(JSON.stringify(data),'owner');
- return {sql,db,snapshot,update};
-}
+import {database} from './database.mjs';
 
 test('大备份原子提交，响应丢失后回执可读，重试不重写且用户隔离',async()=>{
  const {sql,db,snapshot}=database(),source=emptyData();source.blocks=Array.from({length:90},(_,i)=>({id:'b'+i,name:'备份'+i,start:'2026-09-18T10:00',end:'2026-09-18T11:00',taskId:'',done:false,fixed:false}));

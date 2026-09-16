@@ -4,15 +4,21 @@ import {mergeChanges,ChangeConflict,MergeValidationError,type ChangeBaseline} fr
 import {changeWarnings} from './planning';
 import {getChatGPTUser} from '@/app/chatgpt-auth';
 import {applyOperations,emptyData,validateData,type Data,type Snapshot} from './domain';
+import {loadWorkspace,readOperation,type OperationReceipt} from './workspace-storage';
+import {fingerprint} from './fingerprint';
+import {stable} from './changes';
 export class ApiError extends Error{constructor(message:string,public status=400,public details?:unknown){super(message)}}
 export async function owner(req:Request){const u=await getChatGPTUser();if(u)return u.userId;const host=new URL(req.url).hostname;if(process.env.NODE_ENV!=='production'&&['127.0.0.1','localhost','[::1]'].includes(host))return 'local-owner';throw new ApiError('请先登录后使用工作空间。',401);}
 export function guardOrigin(req:Request){const origin=req.headers.get('origin');if(origin&&origin!==new URL(req.url).origin)throw new ApiError('请求来源不匹配。',403);}
 export async function readJson(req:Request,limit=1000000){const reader=req.body?.getReader();if(!reader)throw new ApiError('请求内容为空');const parts:Uint8Array[]=[];let size=0;for(;;){const {done,value}=await reader.read();if(done)break;size+=value.byteLength;if(size>limit){await reader.cancel();throw new ApiError('内容过大，请减少内容后重试。',413)}parts.push(value)}const bytes=new Uint8Array(size);let offset=0;for(const p of parts){bytes.set(p,offset);offset+=p.length}try{return JSON.parse(new TextDecoder().decode(bytes))}catch{throw new ApiError('内容格式无效。')}}
 export function binding(){if(!env.DB)throw new ApiError('数据服务暂不可用，请稍后重试。',503);return env.DB;}
-export async function readWorkspace(user:string):Promise<Snapshot>{const db=binding();await db.prepare('INSERT OR IGNORE INTO workspaces (owner,payload,revision,updated_at) VALUES (?, ?, 0, ?)').bind(user,JSON.stringify(emptyData()),new Date().toISOString()).run();const row=await db.prepare('SELECT payload,revision FROM workspaces WHERE owner = ?').bind(user).first<{payload:string;revision:number}>();if(!row)throw new ApiError('工作空间读取失败。',503);return {data:validateData(JSON.parse(row.payload)),revision:row.revision};}
-export async function writeWorkspace(user:string,base:number,ops:unknown,operationId:string,summary:string,workRevision?:number,baseline?:ChangeBaseline,reviewedRevision?:number):Promise<Snapshot>{
+export async function readWorkspace(user:string):Promise<Snapshot>{return loadWorkspace(binding(),user);}
+export async function writeWorkspace(user:string,base:number,ops:unknown,operationId:string,summary:string,workRevision?:number,baseline?:ChangeBaseline,reviewedRevision?:number):Promise<Snapshot&{receipt?:OperationReceipt}>{
+ const hash=fingerprint(stable(operationId.endsWith('-apply')?{proposalId:operationId}:{ops,baseline,summary}));
  for(let attempt=0;attempt<4;attempt++){
-  const current=await readWorkspace(user);if(current.data.appliedIds.includes(operationId))return current;
+  const current=await readWorkspace(user),receipt=await readOperation(binding(),user,operationId);
+  if(receipt){if(receipt.fingerprint&&receipt.fingerprint!==hash)throw new ApiError('这次提交的内容已改变，请重新保存。',409);if(receipt.status==='cancelled')throw new ApiError('上次提交已结束，请再次保存当前内容。',409,{code:'OPERATION_CLOSED'});return {...await readWorkspace(user),receipt};}
+  if(current.data.appliedIds.includes(operationId))return current;
   let requested=ops,origin=baseline,description=summary,expected=workRevision;
   if(operationId.endsWith('-apply')){
    const receipt=await readChatReceipt(binding(),user,operationId.slice(0,-6));
@@ -27,7 +33,7 @@ export async function writeWorkspace(user:string,base:number,ops:unknown,operati
   const warnings=changeWarnings(current.data,merged);
   if(warnings.length&&reviewedRevision!==current.data.workRevision)throw new ApiError('请核对这次修改对现有安排的影响。',409,{code:'REVIEW_REQUIRED',warnings,snapshot:current});
   const data=merged.length?applyOperations(current.data,merged,operationId,description):{...current.data,appliedIds:[...current.data.appliedIds,operationId].slice(-100)};
-  if(await commitWorkspace(binding(),user,current,data,operationId))return {data,revision:current.revision+1};
+  if(await commitWorkspace(binding(),user,current,data,operationId,hash))return {data,revision:current.revision+1,receipt:(await readOperation(binding(),user,operationId))!};
  }
  throw new ApiError('其他页面正在保存，请稍后重试；本次输入仍保留。',409);
 }

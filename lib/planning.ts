@@ -75,3 +75,7 @@ export function warningsForChange(data:Data,after:Data,operations:Operation[]=[]
 // Keep a true scale, with horizontal scrolling instead of shrinking short tasks.
 export function timelineCell(available:number,total:number){return Math.max(112,Math.min(168,Math.max(600,available-210)/Math.max(1,total)));}
 export function taskPosition(start:string,task:Pick<Task,'start'|'end'>,cell:number){return {left:daysBetween(start,task.start)*cell+3,width:(daysBetween(task.start,task.end)+1)*cell-6};}
+export function visibleTaskPosition(start:string,task:Pick<Task,'start'|'end'>,cell:number,total:number,scroll=0,viewport=Infinity){
+ const actual=taskPosition(start,task,cell),left=Math.max(actual.left,0,scroll),end=Math.min(actual.left+actual.width,total*cell,scroll+viewport);
+ return {left,width:Math.max(0,end-left),before:actual.left<left,after:actual.left+actual.width>end};
+}

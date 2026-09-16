@@ -1,4 +1,5 @@
 import {z} from 'zod';
+import {fingerprint} from './fingerprint.ts';
 import {applyOperations,operationSchema,validateOperationOrder,type Data,type Operation} from './domain.ts';
 
 export const kinds=['project','task','block','contact','resource'] as const;
@@ -36,7 +37,7 @@ function deletionScope(data:Data,kind:Kind,id:string){
 }
 export function captureBaseline(data:Data,operations:Operation[]):ChangeBaseline{
  const found=new Map<string,ChangeBaseline['records'][number]>(),deletions:Record<string,string>={};
- for(const op of operations){const {kind,id}=target(op),key=kind+':'+id;if(!found.has(key))found.set(key,{kind,id,value:structuredClone(records(data,kind).find(r=>r.id===id)||null)});if(op.type.endsWith('.delete'))deletions[key]=deletionScope(data,kind,id);}
+ for(const op of operations){const {kind,id}=target(op),key=kind+':'+id;if(!found.has(key))found.set(key,{kind,id,value:structuredClone(records(data,kind).find(r=>r.id===id)||null)});if(op.type.endsWith('.delete'))deletions[key]='sha256:'+fingerprint(deletionScope(data,kind,id));}
  return {records:[...found.values()],deletions};
 }
 /** Three-way merge preserves current fields the user did not edit. Arrays are atomic fields. */
@@ -51,7 +52,8 @@ export function mergeChanges(current:Data,raw:unknown,rawBaseline:ChangeBaseline
   const conflict=(field:string,b:unknown,c:unknown,p:unknown)=>conflicts.push({kind,id,name:String(wanted?.name||now?.name||base?.name||id),field,base:b,current:c,proposed:p});
   if(wanted===null){
    if(!now)continue;
-   if(!base||baseline.deletions[key]!==deletionScope(current,kind,id)){conflict('$delete',base,now,null);continue;}
+   const scope=deletionScope(current,kind,id),expected=baseline.deletions[key];
+   if(!base||expected!==(expected?.startsWith('sha256:')?'sha256:'+fingerprint(scope):scope)){conflict('$delete',base,now,null);continue;}
    result.push({type:(kind+'.delete') as Operation['type'],id});continue;
   }
   if(!base){if(now){conflict('$record',null,now,wanted);continue;}result.push({type:(kind+'.save') as Operation['type'],data:wanted});continue;}

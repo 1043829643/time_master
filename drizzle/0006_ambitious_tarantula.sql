@@ -1,0 +1,1 @@
+ALTER TABLE `operation_receipts` ADD `status` text DEFAULT 'applied' NOT NULL;
