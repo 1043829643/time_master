@@ -1,7 +1,8 @@
 export class ClientError extends Error {
  status:number;
  retryable:boolean;
- constructor(message:string,status=0,retryable=false){super(message);this.name='ClientError';this.status=status;this.retryable=retryable;}
+ details:any;
+ constructor(message:string,status=0,retryable=false,details?:unknown){super(message);this.name='ClientError';this.status=status;this.retryable=retryable;this.details=details;}
 }
 type Options={signal?:AbortSignal;retries?:number;timeoutMs?:number};
 export function errorMessage(error:unknown){
@@ -23,9 +24,9 @@ async function request<T>(url:string,body:unknown|undefined,parse:(r:Response)=>
    const r=await fetch(url,{method:body===undefined?'GET':'POST',headers:body===undefined?undefined:{'Content-Type':'application/json'},body:body===undefined?undefined:JSON.stringify(body),cache:'no-store',credentials:'same-origin',signal:controller.signal});
    const isJson=r.headers.get('content-type')?.includes('application/json');
    if(r.redirected&&!isJson)throw new ClientError('登录状态已失效，请刷新页面重新登录；未发送的内容会保留。',401);
-   if(!r.ok){let message='';if(isJson){try{message=((await r.json()) as {error?:string}).error||''}catch{}}
+   if(!r.ok){let message='',details:unknown;if(isJson){try{const failure=await r.json() as {error?:string;details?:unknown};message=failure.error||'';details=failure.details}catch{}}
     if(r.status===401)message='登录状态已失效，请刷新页面重新登录；未发送的内容会保留。';
-    throw new ClientError(message||'连接暂时不稳定，请稍后重试。',r.status,[408,502,503,504].includes(r.status));}
+    throw new ClientError(message||'连接暂时不稳定，请稍后重试。',r.status,[408,502,503,504].includes(r.status),details);}
    return await parse(r);
   }catch(error){
    if(options.signal?.aborted)throw new DOMException('已取消','AbortError');

@@ -1,6 +1,7 @@
 import {z} from 'zod';
 import {applyOperations,type Data} from './domain.ts';
 import {proposalSchema} from './chat-state.ts';
+import {describeChanges,changeWarnings} from './planning.ts';
 
 export function parseAssistantResponse(message:any,data:Data,requestId:string){
  if(message?.tool_calls?.length!==1)throw new Error('回复没有形成完整结果');
@@ -13,5 +14,7 @@ export function parseAssistantResponse(message:any,data:Data,requestId:string){
  if(tool.name!=='propose_changes')throw new Error('回复使用了未知操作');
  const draft=proposalSchema.parse(args);if(draft.operations.some(o=>o.type==='message.add'))throw new Error('方案不能修改聊天记录');
  applyOperations(data,draft.operations,'validate-'+requestId);
- return {draft,reply:draft.summary+'\n方案已准备好，查看「待确认方案」后应用。'};
+ draft.summary=describeChanges(data,draft.operations);
+ const warnings=changeWarnings(data,draft.operations).map(w=>w.message);
+ return {draft,reply:draft.summary+(warnings.length?'\n需要留意：'+warnings.slice(0,5).join('；'):'')+'\n方案已准备好，查看「待确认方案」后应用。'};
 }

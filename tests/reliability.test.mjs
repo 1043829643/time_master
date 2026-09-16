@@ -5,6 +5,7 @@ import {readFileSync,readdirSync} from 'node:fs';
 import {emptyData,applyOperations,validateData} from '../lib/domain.ts';
 import {commitChat,readChatReceipt,savedChat,pendingProposals,commitWorkspace} from '../lib/chat-state.ts';
 import {requestJson,ClientError} from '../lib/api-client.ts';
+import {captureBaseline,mergeChanges} from '../lib/changes.ts';
 
 function database(){
  const sql=new DatabaseSync(':memory:');
@@ -18,6 +19,18 @@ function database(){
  const update=(data)=>sql.prepare('UPDATE workspaces SET payload=?,revision=revision+1 WHERE owner=?').run(JSON.stringify(data),'owner');
  return {sql,db,snapshot,update};
 }
+test('新版方案保留原始基线，两份独立方案连续应用与刷新恢复',async()=>{
+ const {sql,db,snapshot}=database();const one={summary:'甲',operations:[{type:'block.save',data:{id:'one',name:'甲',start:'2026-09-18T10:00',end:'2026-09-18T11:00'}}]},two={summary:'乙',operations:[{type:'block.save',data:{id:'two',name:'乙',start:'2026-09-19T10:00',end:'2026-09-19T11:00'}}]};const original=snapshot();
+ await commitChat(db,'owner',snapshot(),'record-one','甲','方案',one,0,captureBaseline(original.data,one.operations));await commitChat(db,'owner',snapshot(),'record-two','乙','方案',two,0,captureBaseline(original.data,two.operations));
+ let current=snapshot();await commitWorkspace(db,'owner',current,applyOperations(current.data,one.operations,'record-one-apply'),'record-one-apply');
+ const saved=savedChat(snapshot(),'record-two','乙',await readChatReceipt(db,'owner','record-two'));assert.equal(saved.draft.blocked,undefined);const ops=mergeChanges(snapshot().data,saved.draft.operations,saved.draft.baseline);current=snapshot();await commitWorkspace(db,'owner',current,applyOperations(current.data,ops,'record-two-apply'),'record-two-apply');assert.equal(snapshot().data.blocks.length,2);assert.equal((await pendingProposals(db,'owner',snapshot())).drafts.length,0);sql.close();
+});
+test('不存在的方案回执不能执行提交，跨用户回执不能代替当前用户',async()=>{
+ const {sql,db,snapshot}=database();const current=snapshot(),data=applyOperations(current.data,[{type:'block.save',data:{id:'x',name:'x',start:'2026-09-18T10:00',end:'2026-09-18T11:00'}}],'missing-apply');assert.equal(await commitWorkspace(db,'owner',current,data,'missing-apply'),false);assert.equal(snapshot().data.blocks.length,0);sql.close();
+});
+test('客户端保留字段冲突详情供表单选择恢复',async(t)=>{
+ const details={code:'FIELD_CONFLICT',conflicts:[{field:'result',current:'甲',proposed:'乙'}]};t.mock.method(globalThis,'fetch',async()=>Response.json({error:'请核对',details},{status:409}));await assert.rejects(requestJson('/api/workspace',{}),e=>e instanceof ClientError&&e.details.code==='FIELD_CONFLICT'&&e.details.conflicts[0].current==='甲');
+});
 const proposal={summary:'新增测试日程',operations:[{type:'block.save',data:{id:'test-block',name:'测试日程',start:'2026-09-16T10:00',end:'2026-09-16T11:00'}}]};
 
 test('聊天不改变业务版本或推进记录，旧数据兼容默认版本',()=>{
