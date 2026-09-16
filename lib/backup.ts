@@ -1,8 +1,8 @@
 import {dataSchema,emptyData,validateData,type Data} from './domain.ts';
 import {warningsForChange} from './planning.ts';
-export const businessKeys=['projects','tasks','blocks','contacts','resources'] as const;
+export const businessKeys=['projects','tasks','blocks','contacts','resources','captures','followups'] as const;
 export type BusinessKey=typeof businessKeys[number];
-export const businessSchema=dataSchema.pick({projects:true,tasks:true,blocks:true,contacts:true,resources:true});
+export const businessSchema=dataSchema.pick({projects:true,tasks:true,blocks:true,contacts:true,resources:true,captures:true,followups:true});
 export type BackupData=ReturnType<typeof businessSchema.parse>;
 export type RestoreMode='missing'|'copies';
 export function parseBackup(input:unknown):BackupData{
@@ -21,13 +21,15 @@ export function restorePlan(current:Data,source:BackupData,mode:RestoreMode,requ
   if(mode==='copies'&&key==='projects')value.name=(value.name+'（恢复副本）').slice(0,160);
   if(key==='tasks'){value.projectId=maps.projects.get(value.projectId);value.dependencies=value.dependencies.map((id:string)=>maps.tasks.get(id));value.contactId=value.contactId?maps.contacts.get(value.contactId):'';}
   if(key==='blocks'){value.taskId=value.taskId?maps.tasks.get(value.taskId):'';if(value.contactId)value.contactId=maps.contacts.get(value.contactId)||'';}
+  if(key==='captures'||key==='followups'){value.projectId=value.projectId?maps.projects.get(value.projectId)||'':'';value.taskId=value.taskId?maps.tasks.get(value.taskId)||'':'';if(key==='captures')value.followupId=value.followupId?maps.followups.get(value.followupId)||'':'';else value.contactId=value.contactId?maps.contacts.get(value.contactId)||'':'';}
   if(key==='resources')value.projectId=maps.projects.get(value.projectId);
   if(key==='contacts')value.roles=value.roles.map((r:any)=>({...r,projectId:maps.projects.get(r.projectId)}));
   (next[key] as any[]).push(value);counts[key]++;
  }
  // Expand a retained project's range if one of its restored children needs it.
  for(const t of next.tasks){const p=next.projects.find(p=>p.id===t.projectId);if(p){if(t.start<p.start)p.start=t.start;if(t.end>p.end)p.end=t.end;}}
+ const relationWarnings:string[]=[];for(const f of next.followups){if(current.followups.some(v=>v.id===f.id)||!f.taskId||!f.projectId)continue;const task=next.tasks.find(t=>t.id===f.taskId);if(task&&task.projectId!==f.projectId){f.projectId=task.projectId;relationWarnings.push('跟进「'+f.name+'」已随当前事项关联到它现在所属的项目。');}}
  const data=validateData(next),rangeWarnings=data.projects.flatMap(p=>{const old=current.projects.find(v=>v.id===p.id);return old&&(old.start!==p.start||old.end!==p.end)?['为容纳恢复的事项，项目「'+p.name+'」的日期将从 '+old.start+' → '+old.end+' 扩展为 '+p.start+' → '+p.end+'。']:[]});
- return {data,counts,warnings:[...rangeWarnings,...warningsForChange(current,data).map(w=>w.message)],total:Object.values(counts).reduce((a,b)=>a+b,0)};
+ return {data,counts,warnings:[...relationWarnings,...rangeWarnings,...warningsForChange(current,data).map(w=>w.message)],total:Object.values(counts).reduce((a,b)=>a+b,0)};
 }
 export function exportBackup(data:Data){return {format:'time-master-backup',version:1,exportedAt:new Date().toISOString(),timezone:'Asia/Shanghai',data};}

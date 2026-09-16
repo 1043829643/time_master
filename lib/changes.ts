@@ -2,7 +2,7 @@ import {z} from 'zod';
 import {fingerprint} from './fingerprint.ts';
 import {applyOperations,operationSchema,validateOperationOrder,type Data,type Operation} from './domain.ts';
 
-export const kinds=['project','task','block','contact','resource'] as const;
+export const kinds=['project','task','block','contact','resource','capture','followup'] as const;
 export type Kind=typeof kinds[number];
 type RecordValue=Record<string,any>;
 export const baselineSchema=z.object({records:z.array(z.object({kind:z.enum(kinds),id:z.string().min(1).max(100),value:z.record(z.unknown()).nullable()})).max(120),deletions:z.record(z.string()).default({})});
@@ -13,7 +13,7 @@ export class ChangeConflict extends Error{
  constructor(conflicts:FieldConflict[]){super('同一处内容有新的修改，请选择保留的内容。');this.name='ChangeConflict';this.conflicts=conflicts;}
 }
 export class MergeValidationError extends Error{operations:Operation[];constructor(message:string,operations:Operation[]){super(message);this.name='MergeValidationError';this.operations=operations;}}
-export function records(data:Data,kind:Kind):RecordValue[]{return data[({project:'projects',task:'tasks',block:'blocks',contact:'contacts',resource:'resources'} as const)[kind]];}
+export function records(data:Data,kind:Kind):RecordValue[]{return data[({project:'projects',task:'tasks',block:'blocks',contact:'contacts',resource:'resources',capture:'captures',followup:'followups'} as const)[kind]];}
 export function stable(value:unknown):string{
  if(value===undefined)return 'null';
  if(value===null||typeof value!=='object')return JSON.stringify(value);
@@ -27,6 +27,7 @@ function deletionScope(data:Data,kind:Kind,id:string){
  const value=records(data,kind).find(r=>r.id===id);if(!value)return 'missing';
  const tasks=new Set(kind==='project'?data.tasks.filter(t=>t.projectId===id).map(t=>t.id):kind==='task'?[id]:[]);
  const affected:any={value};
+ if(kind==='project'||kind==='task'||kind==='contact'||kind==='followup'){affected.captures=data.captures.filter(c=>kind==='project'?c.projectId===id||tasks.has(c.taskId):kind==='task'?c.taskId===id:kind==='followup'?c.followupId===id:false);affected.followups=data.followups.filter(f=>kind==='project'?f.projectId===id||tasks.has(f.taskId):kind==='task'?f.taskId===id:kind==='contact'?f.contactId===id:false);}
  if(tasks.size||kind==='project'){
   affected.tasks=data.tasks.filter(t=>tasks.has(t.id)||t.dependencies.some(dep=>tasks.has(dep)));
   affected.blocks=data.blocks.filter(b=>tasks.has(b.taskId));
@@ -70,4 +71,4 @@ export function mergeChanges(current:Data,raw:unknown,rawBaseline:ChangeBaseline
  if(result.length)try{applyOperations(current,result,'validate-merge')}catch(e){throw new MergeValidationError(e instanceof Error?e.message:'合并后的安排需要检查。',result)}
  return result;
 }
-export const fieldLabels:Record<string,string>={name:'名称',goal:'目标',start:'开始时间',end:'结束时间',status:'状态',shortName:'简称',description:'具体内容',result:'推进记录',hours:'预计投入',owner:'负责人',dependencies:'前置事项',contactId:'联系人',projectId:'所属项目',taskId:'关联事项',roles:'项目职责',notes:'备注',wechat:'联系方式',device:'电脑',path:'工程路径',purpose:'用途',done:'完成状态',fixed:'固定安排',$record:'整条记录',$delete:'删除及关联内容'};
+export const fieldLabels:Record<string,string>={name:'名称',goal:'目标',start:'开始时间',end:'结束时间',status:'状态',shortName:'简称',description:'具体内容',result:'推进记录',hours:'预计投入',owner:'负责人',dependencies:'前置事项',contactId:'联系人',projectId:'所属项目',taskId:'关联事项',roles:'项目职责',notes:'备注',wechat:'联系方式',device:'电脑',path:'工程路径',purpose:'用途',done:'完成状态',fixed:'固定安排',priority:'优先级',deadline:'硬截止日期',remainingHours:'剩余投入',energy:'精力需求',dueAt:'下次跟进',blocksTask:'阻塞事项',reviewOn:'再次查看日期',followupId:'跟进记录',lastContactAt:'最近联系',resolvedAt:'解决时间',createdAt:'记录时间',$record:'整条记录',$delete:'删除及关联内容'};

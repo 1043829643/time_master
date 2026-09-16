@@ -4,7 +4,7 @@ import {useEffect,useState} from 'react';
 import {X,FilePenLine} from 'lucide-react';
 import {listDrafts} from '@/lib/editor-draft';
 import {type EditItem} from './editor';
-const labels={project:'项目',task:'事项',block:'日程',contact:'联系人',resource:'工程位置'};
+const labels={project:'项目',task:'事项',block:'日程',contact:'联系人',resource:'工程位置',capture:'随手记',followup:'跟进'};
 export default function DraftLibrary({open}:{open:(item:EditItem)=>void}){
  const [items,setItems]=useState<ReturnType<typeof listDrafts>>([]),[visible,setVisible]=useState(false);
  useEffect(()=>{const refresh=()=>setItems(listDrafts());refresh();window.addEventListener('time-master-drafts-changed',refresh);return()=>window.removeEventListener('time-master-drafts-changed',refresh)},[]);

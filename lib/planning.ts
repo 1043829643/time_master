@@ -6,6 +6,7 @@ export function taskBlockers(data:Data,task:Task):string[]{
  if(project?.status==='done')reasons.push('所属项目已完成');
  if(task.status==='paused')reasons.push('事项已暂停');
  if(task.status==='waiting')reasons.push('事项正在等待跟进');
+ for(const f of data.followups||[])if(f.status==='waiting'&&f.blocksTask&&f.taskId===task.id)reasons.push('等待：'+f.name);
  const pending=task.dependencies.map(id=>data.tasks.find(t=>t.id===id)).filter(t=>t&&t.status!=='done');
  if(pending.length)reasons.push('等待前置：'+pending.map(t=>t!.name).join('、'));
  return reasons;
@@ -40,8 +41,8 @@ export function blockRisks(data:Data,block:Block):string[]{
 export function releasableBlocks(data:Data,taskId?:string){return data.blocks.filter(b=>!b.done&&b.start>=localDay()+'T00:00'&&(!taskId||b.taskId===taskId)&&data.tasks.some(t=>t.id===b.taskId&&(t.status==='done'||data.projects.some(p=>p.id===t.projectId&&p.status==='done'))));}
 export type ChangeWarning={code:string;message:string};
 export function describeChanges(data:Data,operations:Operation[]){
- const names={project:'项目',task:'事项',block:'日程',contact:'联系人',resource:'工程位置'};
- const lines=operations.slice(0,4).map(op=>{const kind=op.type.split('.')[0] as keyof typeof names,v=op.data as any,collection=kind==='project'?data.projects:kind==='task'?data.tasks:kind==='block'?data.blocks:kind==='contact'?data.contacts:data.resources,old=collection.find(x=>x.id===(op.id||v?.id));const project=(kind==='task'||kind==='resource')?data.projects.find(p=>p.id===(v?.projectId||(old as any)?.projectId)):undefined;return (op.type.endsWith('.delete')?'删除':old?'更新':'新增')+names[kind]+'「'+(v?.name||old?.name||'记录')+'」'+(project?'（'+project.name+'）':'')+(v?.start||v?.end?'：'+String(v.start||((old as any)?.start)||'未定').replace('T',' ')+' → '+String(v.end||((old as any)?.end)||'未定').replace('T',' '):'');});
+ const names={project:'项目',task:'事项',block:'日程',contact:'联系人',resource:'工程位置',capture:'随手记',followup:'跟进'};
+ const lines=operations.slice(0,4).map(op=>{const kind=op.type.split('.')[0] as keyof typeof names,v=op.data as any,collection=kind==='project'?data.projects:kind==='task'?data.tasks:kind==='block'?data.blocks:kind==='contact'?data.contacts:kind==='capture'?data.captures:kind==='followup'?data.followups:data.resources,old=collection.find(x=>x.id===(op.id||v?.id));const project=(kind==='task'||kind==='resource')?data.projects.find(p=>p.id===(v?.projectId||(old as any)?.projectId)):undefined;return (op.type.endsWith('.delete')?'删除':old?'更新':'新增')+names[kind]+'「'+(v?.name||old?.name||'记录')+'」'+(project?'（'+project.name+'）':'')+(kind==='followup'?(v?.status==='resolved'?'，已收到 / 已解决':v?.status==='cancelled'?'，取消跟进':v?.dueAt?'，下次跟进：'+v.dueAt.replace('T',' '):''):'')+(v?.start||v?.end?'：'+String(v.start||((old as any)?.start)||'未定').replace('T',' ')+' → '+String(v.end||((old as any)?.end)||'未定').replace('T',' '):'');});
  return (lines.join('；')+(operations.length>4?'；另有 '+(operations.length-4)+' 项变更。':'。')).slice(0,300);
 }
 export function changeWarnings(data:Data,operations:Operation[]):ChangeWarning[]{

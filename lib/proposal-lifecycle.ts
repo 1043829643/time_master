@@ -8,7 +8,7 @@ export const targetOf=(op:Operation)=>({kind:op.type.split('.')[0],id:op.id||Str
 export function effectiveOperations(data:Data,ops:Operation[]){
  return ops.filter(op=>{
   if(!op.type.endsWith('.save'))return true;
-  const {kind,id}=targetOf(op),key=({project:'projects',task:'tasks',block:'blocks',contact:'contacts',resource:'resources'} as const)[kind as 'project'];
+  const {kind,id}=targetOf(op),key=({project:'projects',task:'tasks',block:'blocks',contact:'contacts',resource:'resources',capture:'captures',followup:'followups'} as const)[kind as 'project'];
   const old=(data[key] as any[]|undefined)?.find(v=>v.id===id);
   if(!old)return true;
   const clean=(v:any)=>Object.fromEntries(Object.entries(v).filter(([k])=>k!=='updatedAt'));

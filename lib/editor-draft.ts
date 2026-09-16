@@ -29,6 +29,7 @@ export function draftAsNew(draft:EditorDraft,data:Data,newId=crypto.randomUUID()
 }
 export function formEntries(form:HTMLFormElement):[string,string][]{return [...new FormData(form).entries()].map(([key,value])=>[key,String(value)]);}
 export function restoreEntries(form:HTMLFormElement,entries:[string,string][]){
+ entries=entries.map(([k,v])=>[k==='captureStatus'?'status':k,v]);
  for(const el of Array.from(form.elements)){
   if(!(el instanceof HTMLInputElement||el instanceof HTMLTextAreaElement||el instanceof HTMLSelectElement)||!el.name)continue;
   const values=entries.filter(([key])=>key===el.name).map(([,value])=>value);

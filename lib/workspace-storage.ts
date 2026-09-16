@@ -3,7 +3,7 @@ import {kinds,records,type ChangeBaseline} from './changes.ts';
 import {fingerprint} from './fingerprint.ts';
 import {transitionsForWrite,transitionStatements} from './proposal-lifecycle.ts';
 
-export const collections=['projects','tasks','blocks','contacts','resources','messages','history'] as const;
+export const collections=['projects','tasks','blocks','contacts','resources','captures','followups','messages','history'] as const;
 type StoredRecord={kind:string;id:string;payload:string;position:number};
 const encoder=new TextEncoder();
 export const metadata=(data:Data)=>JSON.stringify({workRevision:data.workRevision,appliedIds:data.appliedIds});
@@ -24,7 +24,7 @@ export async function ensureWorkspace(db:D1Database,owner:string){
    SELECT w.owner,?,${kind==='history'?"'history-' || j.key":"json_extract(j.value,'$.id')"},j.value,CAST(j.key AS INTEGER)
    FROM workspaces w,json_each(w.payload,?) j WHERE w.owner=? AND w.storage_version=0`).bind(kind,'$.'+kind,owner)),
   db.prepare("INSERT OR IGNORE INTO operation_receipts(owner,operation_id,fingerprint,revision,created_at) SELECT w.owner,j.value,'',w.revision,w.updated_at FROM workspaces w,json_each(w.payload,'$.appliedIds') j WHERE w.owner=? AND w.storage_version=0").bind(owner),
-  db.prepare("UPDATE workspaces SET payload=json_remove(payload,'$.projects','$.tasks','$.blocks','$.contacts','$.resources','$.messages','$.history'),storage_version=1 WHERE owner=? AND storage_version=0").bind(owner)
+  db.prepare("UPDATE workspaces SET payload=json_remove(payload,'$.projects','$.tasks','$.blocks','$.contacts','$.resources','$.captures','$.followups','$.messages','$.history'),storage_version=1 WHERE owner=? AND storage_version=0").bind(owner)
  ]);
 }
 export async function loadWorkspace(db:D1Database,owner:string):Promise<Snapshot>{
