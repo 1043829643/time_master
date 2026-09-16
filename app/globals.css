@@ -135,3 +135,7 @@ body {
   color: var(--foreground);
   font-family: Arial, Helvetica, sans-serif;
 }
+
+.execution-receipt{margin-top:12px;padding:12px 14px;border:1px solid var(--line,#dce4d6);border-radius:12px;background:var(--surface,#f5f7f0);display:flex;flex-wrap:wrap;align-items:center;gap:8px 12px}.execution-receipt strong{font-size:13px}.execution-receipt small{color:var(--muted,#70816b)}.execution-receipt .text-button{margin-left:auto}
+
+.execution-details{width:100%;font-size:12px}.execution-details summary{cursor:pointer;color:var(--muted,#70816b)}.execution-details dl{margin:8px 0}.execution-details dl div{display:grid;grid-template-columns:85px 1fr;gap:8px;padding:3px 0}.execution-details dd{margin:0;overflow-wrap:anywhere}

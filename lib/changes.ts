@@ -46,7 +46,7 @@ export function mergeChanges(current:Data,raw:unknown,rawBaseline:ChangeBaseline
  const operations=z.array(operationSchema).min(1).max(60).parse(raw),baseline=baselineSchema.parse(rawBaseline),conflicts:FieldConflict[]=[],result:Operation[]=[];
  validateOperationOrder(operations);let unresolved=false;
  const intended=new Map<string,RecordValue|null>(),last=new Map<string,number>();
- operations.forEach((op,i)=>{const {kind,id}=target(op),key=kind+':'+id,base=baseline.records.find(r=>r.kind===kind&&r.id===id);if(!base)throw new Error('编辑基线不完整，请重新打开记录。');const previous=intended.has(key)?intended.get(key):base.value;intended.set(key,op.type.endsWith('.delete')?null:{...previous,...op.data as RecordValue});last.set(key,i)});
+ operations.forEach((op,i)=>{const {kind,id}=target(op),key=kind+':'+id,base=baseline.records.find(r=>r.kind===kind&&r.id===id);if(!base)throw new Error('编辑基线不完整，请重新打开记录。');const previous=intended.has(key)?intended.get(key):base.value;intended.set(key,op.type.endsWith('.delete')?null:{...previous,...op.data as RecordValue});if(op.unset)for(const field of op.unset)intended.get(key)![field]=undefined;last.set(key,i)});
  for(let i=0;i<operations.length;i++){
   const op=operations[i],{kind,id}=target(op),key=kind+':'+id;if(last.get(key)!==i)continue;
   const base=baseline.records.find(r=>r.kind===kind&&r.id===id)!.value,now=records(current,kind).find(r=>r.id===id)||null,wanted=intended.get(key)!;
@@ -65,7 +65,7 @@ export function mergeChanges(current:Data,raw:unknown,rawBaseline:ChangeBaseline
    if(!same(now[field],base[field])&&!same(now[field],wanted[field])){conflict(field,base[field],now[field],wanted[field]);const chosen=typeof resolution==='string'?resolution:resolution?.[kind+':'+id+':'+field]||resolution?.[field];if(chosen!=='mine'&&chosen!=='theirs')unresolved=true;if(chosen==='theirs')continue;}
    merged[field]=wanted[field];
   }
-  result.push({type:(kind+'.save') as Operation['type'],data:merged});
+  result.push({type:(kind+'.save') as Operation['type'],data:merged,unset:Object.keys(merged).filter(k=>merged[k]===undefined)});
  }
  if(conflicts.length&&(unresolved||!resolution||conflicts.some(c=>c.field.startsWith('$'))))throw new ChangeConflict(conflicts);
  if(result.length)try{applyOperations(current,result,'validate-merge')}catch(e){throw new MergeValidationError(e instanceof Error?e.message:'合并后的安排需要检查。',result)}

@@ -3,10 +3,11 @@ import {applyOperations,operationSchema,type Snapshot} from './domain.ts';
 import {mergeChanges,type ChangeBaseline} from './changes.ts';
 import {changeWarnings} from './planning.ts';
 import {pendingPlanWarnings,type ReviewablePlan} from './proposal-review.ts';
-import {commitHeader,commitGuard,recordStatements,commitRecords,workspaceRevision} from './workspace-storage.ts';
+import {commitHeader,commitGuard,recordStatements,commitRecords,workspaceRevision,operationReceiptStatements,operationEffects} from './workspace-storage.ts';
+import {completeRequestStatements} from './chat-requests.ts';
 import {hydrateReceipts,chatPartStatements} from './chat-parts.ts';
-import {targetStatements,transitionStatements,type PlanTransition} from './proposal-lifecycle.ts';
-import {memoryStatements,type ConversationMemory} from './conversation-memory.ts';
+import {targetStatements,transitionStatements,transitionsForWrite,type PlanTransition} from './proposal-lifecycle.ts';
+import {reconcileMemoryStatements,memoryStatements,type ConversationMemory} from './conversation-memory.ts';
 
 export const proposalSchema=z.object({summary:z.string().min(1).max(300),operations:z.array(operationSchema).min(1).max(30)});
 export type Proposal=z.infer<typeof proposalSchema>;
@@ -67,18 +68,28 @@ export async function commitWorkspace(db:D1Database,user:string,current:Snapshot
 
 // Both statements run in one transaction. A unique token prevents a losing retry
 // from updating the workspace using another request's already-saved receipt.
-export type ConversationCommit={memories?:ConversationMemory[];forgotten?:string[];transitions?:PlanTransition[];audit?:unknown};
+export type ConversationCommit={memories?:ConversationMemory[];forgotten?:string[];transitions?:PlanTransition[];audit?:unknown;lease?:string;execution?:{operations:Proposal['operations'];sourceProposalId?:string}};
 export async function commitChat(db:D1Database,user:string,current:Snapshot,requestId:string,text:string,reply:string,draft:Proposal|null,workRevision:number,baseline?:ChangeBaseline,conversation:ConversationCommit={}){
  const at=new Date().toISOString(),commitToken=crypto.randomUUID();
- const data=applyOperations(current.data,[{type:'message.add',data:{id:requestId+'-u',role:'user',content:text,at}},{type:'message.add',data:{id:requestId+'-a',role:'assistant',content:reply,at}}],requestId);
+ const executed=conversation.execution?applyOperations(current.data,conversation.execution.operations,requestId+'-execute','时间伙伴执行'):current.data;
+ const data=applyOperations(executed,[{type:'message.add',data:{id:requestId+'-u',role:'user',content:text,at}},{type:'message.add',data:{id:requestId+'-a',role:'assistant',content:reply,at}}],requestId);
+ let condition=' AND NOT EXISTS (SELECT 1 FROM chat_receipts WHERE owner=? AND request_id=?)';const args:unknown[]=[user,requestId];
+ if(conversation.lease){condition+=" AND EXISTS (SELECT 1 FROM chat_requests WHERE owner=? AND request_id=? AND state='processing' AND lease_token=? AND lease_until>?)";args.push(user,requestId,conversation.lease,Date.now())}
+ const source=conversation.execution?.sourceProposalId;
+ const automaticTransitions=conversation.execution?await transitionsForWrite(db,user,current.data,data,operationEffects(current.data,data),source):[];
+ if(source){condition+=" AND EXISTS (SELECT 1 FROM chat_receipts WHERE owner=? AND request_id=? AND proposal_state='pending')";args.push(user,source)}
  const results=await db.batch([
-  commitHeader(db,user,current,data,commitToken,' AND NOT EXISTS (SELECT 1 FROM chat_receipts WHERE owner=? AND request_id=?)',[user,requestId]),
+  commitHeader(db,user,current,data,commitToken,condition,args),
   ...recordStatements(db,user,commitToken,current.data,data),
+  ...(conversation.execution?operationReceiptStatements(db,user,commitToken,current.data,data,requestId+'-execute',current.revision+1):[]),
   db.prepare(`INSERT INTO chat_receipts (owner,request_id,request_text,reply,proposal,work_revision,commit_token,created_at,base_records,sequence,payload_version,protocol_version,turn_context) SELECT ?,?,?,?,?,?,?,?,?,?,1,2,? WHERE ${commitGuard}`).bind(user,requestId,text,reply,draft?JSON.stringify({summary:draft.summary}):null,workRevision,commitToken,at,baseline?'parts':null,current.revision+1,conversation.audit?JSON.stringify(conversation.audit):null,user,commitToken),
   ...chatPartStatements(db,user,requestId,commitToken,draft,baseline),
   ...targetStatements(db,user,requestId,commitToken,draft?.operations||[]),
-  ...transitionStatements(db,user,commitToken,conversation.transitions||[]),
+  ...transitionStatements(db,user,commitToken,[...automaticTransitions,...conversation.transitions||[]]),
   ...memoryStatements(db,user,commitToken,conversation.memories||[],conversation.forgotten||[]),
+  ...(source?[db.prepare(`UPDATE chat_receipts SET proposal_state='applied' WHERE owner=? AND request_id=? AND ${commitGuard}`).bind(user,source,user,commitToken)]:[]),
+  ...(conversation.lease?completeRequestStatements(db,user,requestId,commitToken,conversation.lease):[]),
+  ...reconcileMemoryStatements(db,user,commitToken),
  ]);
  return results[0].meta.changes===1?{data,revision:current.revision+1}:null;
 }
@@ -86,6 +97,7 @@ export async function commitChat(db:D1Database,user:string,current:Snapshot,requ
 export async function dismissProposal(db:D1Database,user:string,current:Snapshot,requestId:string){
  const token=crypto.randomUUID();const result=await db.batch([
   commitHeader(db,user,current,current.data,token," AND EXISTS (SELECT 1 FROM chat_receipts WHERE owner=? AND request_id=? AND proposal_state='pending' AND proposal IS NOT NULL)",[user,requestId]),
-  db.prepare(`UPDATE chat_receipts SET proposal_state='dismissed' WHERE owner=? AND request_id=? AND ${commitGuard}`).bind(user,requestId,user,token)
+  db.prepare(`UPDATE chat_receipts SET proposal_state='dismissed' WHERE owner=? AND request_id=? AND ${commitGuard}`).bind(user,requestId,user,token),
+  ...reconcileMemoryStatements(db,user,token)
  ]);return result[0].meta.changes===1;
 }

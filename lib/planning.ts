@@ -33,6 +33,7 @@ export function blockRisks(data:Data,block:Block):string[]{
  const reasons=taskBlockers(data,task);
  if(block.start.slice(0,10)<task.start)reasons.push('早于事项预计开始：'+task.start+'，请核对是否需要改期');
  if(block.end>addDays(task.end,1)+'T00:00')reasons.push('超出事项预计结束：'+task.end+'，请核对是否需要改期');
+ const deadline=task.deadlineAt||(task.deadline?addDays(task.deadline,1)+'T00:00':'');if(deadline&&block.end>deadline)reasons.push('超出硬截止：'+(task.deadlineAt||task.deadline)+'，需要调整安排');
  if(task.status==='done')reasons.push('关联事项已完成，可释放这段预留时间');
  const late=task.dependencies.map(id=>data.tasks.find(t=>t.id===id)).filter(t=>t&&t.status!=='done'&&t.end>=block.start.slice(0,10));
  if(late.length)reasons.push('前置预计完成晚于本时段：'+late.map(t=>t!.name+'（'+t!.end+'）').join('、'));
@@ -40,10 +41,12 @@ export function blockRisks(data:Data,block:Block):string[]{
 }
 export function releasableBlocks(data:Data,taskId?:string){return data.blocks.filter(b=>!b.done&&b.start>=localDay()+'T00:00'&&(!taskId||b.taskId===taskId)&&data.tasks.some(t=>t.id===b.taskId&&(t.status==='done'||data.projects.some(p=>p.id===t.projectId&&p.status==='done'))));}
 export type ChangeWarning={code:string;message:string};
-export function describeChanges(data:Data,operations:Operation[]){
+export function describeChanges(data:Data,operations:Operation[],limit=300){
  const names={project:'项目',task:'事项',block:'日程',contact:'联系人',resource:'工程位置',capture:'随手记',followup:'跟进'};
- const lines=operations.slice(0,4).map(op=>{const kind=op.type.split('.')[0] as keyof typeof names,v=op.data as any,collection=kind==='project'?data.projects:kind==='task'?data.tasks:kind==='block'?data.blocks:kind==='contact'?data.contacts:kind==='capture'?data.captures:kind==='followup'?data.followups:data.resources,old=collection.find(x=>x.id===(op.id||v?.id));const project=(kind==='task'||kind==='resource')?data.projects.find(p=>p.id===(v?.projectId||(old as any)?.projectId)):undefined;return (op.type.endsWith('.delete')?'删除':old?'更新':'新增')+names[kind]+'「'+(v?.name||old?.name||'记录')+'」'+(project?'（'+project.name+'）':'')+(kind==='followup'?(v?.status==='resolved'?'，已收到 / 已解决':v?.status==='cancelled'?'，取消跟进':v?.dueAt?'，下次跟进：'+v.dueAt.replace('T',' '):''):'')+(v?.start||v?.end?'：'+String(v.start||((old as any)?.start)||'未定').replace('T',' ')+' → '+String(v.end||((old as any)?.end)||'未定').replace('T',' '):'');});
- return (lines.join('；')+(operations.length>4?'；另有 '+(operations.length-4)+' 项变更。':'。')).slice(0,300);
+ const labels:Record<string,string>={shortName:'简称',owner:'负责人',start:'开始',end:'结束',status:'状态',goal:'目标',description:'内容',notes:'备注',result:'推进记录',remainingHours:'剩余小时',hours:'预计小时',deadline:'截止日期',deadlineAt:'截止时刻',priority:'优先级',energy:'精力',reviewOn:'再次查看',dueAt:'下次跟进',device:'电脑',path:'路径',purpose:'用途',wechat:'微信',roles:'职责',dependencies:'前置条件',blocksTask:'阻塞事项',done:'完成',fixed:'固定'};
+ const values:Record<string,string>={todo:'待开始',doing:'进行中',waiting:'等待',done:'完成',paused:'暂停',active:'推进中',archived:'已归档',converted:'已整理',inbox:'待整理',resolved:'已解决',cancelled:'已取消',high:'重要',normal:'普通',low:'较低',focus:'专注',light:'轻量'};
+ const lines=operations.map(op=>{const kind=op.type.split('.')[0] as keyof typeof names,v=op.data as any,collection=kind==='project'?data.projects:kind==='task'?data.tasks:kind==='block'?data.blocks:kind==='contact'?data.contacts:kind==='capture'?data.captures:kind==='followup'?data.followups:data.resources,old=collection.find(x=>x.id===(op.id||v?.id)) as any;const changes=Object.entries(v||{}).filter(([k,value])=>!['start','end'].includes(k)&&labels[k]&&JSON.stringify(value)!==JSON.stringify(old?.[k])&&(!!old||value!==''&&value!==false&&(!Array.isArray(value)||value.length>0)&&!['todo','active'].includes(String(value)))).map(([k,value])=>labels[k]+'：'+(typeof value==='boolean'?value?'是':'否':Array.isArray(value)?value.map(x=>typeof x==='object'?x.role:x).join('、')||'无':value===''?'未设置':values[String(value)]||String(value).replace('T',' ')));if(v&&(v.start&&v.start!==old?.start||v.end&&v.end!==old?.end))changes.unshift(String(v.start||old?.start||'未定').replace('T',' ')+' → '+String(v.end||old?.end||'未定').replace('T',' '));return (op.type.endsWith('.delete')?'删除':old?'更新':'新增')+names[kind]+'「'+(v?.name||old?.name||'记录')+'」'+(changes.length?'，'+changes.join('，'):'');});
+ return (lines.join('；')+'。').slice(0,limit);
 }
 export function changeWarnings(data:Data,operations:Operation[]):ChangeWarning[]{
  if(!operations.length)return [];

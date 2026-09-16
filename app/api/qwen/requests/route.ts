@@ -1,0 +1,6 @@
+import {owner,binding,errorResponse,readWorkspace,guardOrigin,readJson} from '@/lib/store';
+import {recentRequests,cancelChatRequest,receiveChatRequest} from '@/lib/chat-requests';
+import {readOperation} from '@/lib/workspace-storage';
+import {z} from 'zod';
+export async function GET(req:Request){try{const user=await owner(req),db=binding(),requests=await recentRequests(db,user);const executions=await Promise.all(requests.filter(r=>r.state==='completed').map(async r=>{const receipt=await readOperation(db,user,r.request_id+'-execute');if(!receipt)return null;const undo=await readOperation(db,user,r.request_id+'-execute-undo');return {id:r.request_id+'-execute',...receipt,undone:undo?.status==='applied'}}));return Response.json({requests,executions:executions.filter(Boolean),snapshot:await readWorkspace(user)},{headers:{'Cache-Control':'no-store'}})}catch(e){return errorResponse(e)}}
+export async function POST(req:Request){try{guardOrigin(req);const user=await owner(req),{id,text}=z.object({id:z.string().min(8).max(80),text:z.string().max(8000)}).parse(await readJson(req));await receiveChatRequest(binding(),user,id,text).catch(e=>{if(!String(e).includes('已取消'))throw e});return Response.json({request:await cancelChatRequest(binding(),user,id),snapshot:await readWorkspace(user)})}catch(e){return errorResponse(e)}}

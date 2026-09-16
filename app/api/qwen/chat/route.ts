@@ -4,28 +4,36 @@ import {localDay} from '@/lib/domain';
 import {captureBaseline} from '@/lib/changes';
 import {pendingPlanWarnings,pendingContext} from '@/lib/proposal-review';
 import {savedChat,readChatReceipt,commitChat,allPendingPlans} from '@/lib/chat-state';
-import {readMemories} from '@/lib/conversation-memory';
+import {readMemories,mergeMemories,stageMemories,memoriesForProposal} from '@/lib/conversation-memory';
 import {parseConversation,conversationTool} from '@/lib/conversation-response';
 import {conversationInstructions} from '@/lib/conversation-instructions';
 import {calendarContext} from '@/lib/conversation-dates';
 import {z} from 'zod';
+import {receiveChatRequest,claimChatRequest,failChatRequest,recentRequests,RequestBusy} from '@/lib/chat-requests';
+import {resolveExecution} from '@/lib/agent-execution';
+import {readOperation,verifyOperation,operationEffects} from '@/lib/workspace-storage';
+import {applyOperations} from '@/lib/domain';
 
-export async function POST(req:Request){try{
+async function completed(db:D1Database,user:string,requestId:string,text:string){const receipt=await readChatReceipt(db,user,requestId);if(!receipt)return null;const execution=await readOperation(db,user,requestId+'-execute');const undone=execution?await readOperation(db,user,requestId+'-execute-undo'):null;return {...savedChat(await readWorkspace(user),requestId,text,receipt),execution:execution?{id:requestId+'-execute',...execution,undone:undone?.status==='applied'}:null};}
+
+export async function POST(req:Request){let active:{db:D1Database;user:string;id:string;lease:string}|undefined;try{
  guardOrigin(req);const user=await owner(req);
  const {text,requestId}=z.object({text:z.string().trim().min(1).max(8000),revision:z.number().int().min(0).optional(),requestId:z.string().min(8).max(80)}).parse(await readJson(req));
  const db=binding(),deadline=Date.now()+65000;
+ const replay=await completed(db,user,requestId,text);if(replay)return Response.json(replay);
+ await receiveChatRequest(db,user,requestId,text);const lease=await claimChatRequest(db,user,requestId);active={db,user,id:requestId,lease};
  // Answers, memories and plan transitions all belong to one context revision.
  // A concurrent edit requires fresh reasoning, not merely a fresh commit token.
  for(let generation=0;generation<2;generation++){
   const snapshot=await readWorkspace(user),cached=await readChatReceipt(db,user,requestId);
-  if(cached)return Response.json(savedChat(await readWorkspace(user),requestId,text,cached),{headers:{'Cache-Control':'no-store'}});
+  if(cached)return Response.json(await completed(db,user,requestId,text),{headers:{'Cache-Control':'no-store'}});
   if(snapshot.data.appliedIds.includes(requestId))throw new ApiError('这条消息已经完成，历史回复已归档。请重新发送新消息。',410);
-  const [pending,memories,receipts]=await Promise.all([
+  const [pending,memories,receipts,requests]=await Promise.all([
    allPendingPlans(db,user),readMemories(db,user,localDay()),
-   db.prepare('SELECT request_id,request_text,proposal_state,state_reason FROM chat_receipts WHERE owner=? AND proposal IS NOT NULL ORDER BY sequence DESC LIMIT 40').bind(user).all(),
+   db.prepare('SELECT request_id,request_text,proposal_state,state_reason FROM chat_receipts WHERE owner=? AND proposal IS NOT NULL ORDER BY sequence DESC LIMIT 40').bind(user).all(),recentRequests(db,user),
   ]);
   if((await readWorkspace(user)).revision!==snapshot.revision)continue;
-  const context={...snapshot.data,messages:undefined,history:undefined,appliedIds:undefined,savedSchedules:snapshot.data.blocks.map(b=>({id:b.id,name:b.name,start:b.start,end:b.end,state:'已经保存'})),savedTasks:snapshot.data.tasks.map(t=>({id:t.id,name:t.name,project:t.projectId,start:t.start,end:t.end,state:'已经保存'})),...pendingContext(snapshot.data,pending),memories,proposalHistory:receipts.results};
+  const context={...snapshot.data,messages:undefined,history:undefined,appliedIds:undefined,savedSchedules:snapshot.data.blocks.map(b=>({id:b.id,name:b.name,start:b.start,end:b.end,state:'已经保存'})),savedTasks:snapshot.data.tasks.map(t=>({id:t.id,name:t.name,project:t.projectId,start:t.start,end:t.end,state:'已经保存'})),...pendingContext(snapshot.data,pending),memories,proposalHistory:receipts.results,unfinishedRequests:requests.filter(r=>r.request_id!==requestId&&r.state==='failed').map(r=>({text:r.request_text,state:r.state,explanation:'原话已收到但尚未执行；结合本轮补充理解，以最新更正为准'}))};
   const system=conversationInstructions(localDay())+'\n权威日历（相对日期按此换算，不要自己心算）：'+JSON.stringify(calendarContext(localDay()))+'\n工作空间：'+JSON.stringify(context);
   const messages:any[]=[{role:'system',content:system},...snapshot.data.messages.slice(-24).map(m=>({role:m.role,content:m.role==='assistant'?'【当时的历史回复，保存状态和日期可能已改变，以本轮工作空间为准】'+m.content:m.content})),{role:'user',content:text}];
   let result:ReturnType<typeof parseConversation>|undefined;
@@ -40,11 +48,17 @@ export async function POST(req:Request){try{
   }
   if(!result)throw new ApiError('暂时未能整理这段话，请重试。',422);
   let {reply,draft,conversation}=result;
+  const confirmationId=result.execution.mode==='confirm'?(result.execution.proposalId?.replace(/-apply$/,'')||(pending.length===1?pending[0].id.replace(/-apply$/,''):'')):'';
+  const executionMemories=confirmationId?await memoriesForProposal(db,user,memories,confirmationId):memories;
+  const resolved=resolveExecution(snapshot.data,draft,result.execution,text,pending,mergeMemories(executionMemories,conversation.memories,conversation.forgotten));
+  draft=resolved.draft;
+  if(resolved.execution)reply=[result.information,'已保存并核对：'+resolved.summary].filter(Boolean).join('\n\n');
+  if(resolved.notice)reply=result.execution.mode==='confirm'?'这份方案尚未应用。'+resolved.notice:reply+'\n\n'+resolved.notice;
   const baseline=draft?captureBaseline(snapshot.data,draft.operations):undefined;
   if(draft){const remaining=pending.filter(p=>!conversation.transitions.some(t=>t.id===p.id.replace(/-apply$/,'')));const warnings=pendingPlanWarnings(snapshot.data,[...remaining,{...draft,id:requestId+'-apply',workRevision:snapshot.data.workRevision,baseline}],new Set([requestId+'-apply']))[requestId+'-apply']||[];if(warnings.length)reply+='\n与其他待确认方案对照：'+warnings.slice(0,5).join('；');}
-  const updated=await commitChat(db,user,snapshot,requestId,text,reply.slice(0,16000),draft,snapshot.data.workRevision,baseline,conversation);
-  if(updated){const receipt=await readChatReceipt(db,user,requestId);return Response.json(savedChat(await readWorkspace(user),requestId,text,receipt!),{headers:{'Cache-Control':'no-store'}});}
+  const updated=await commitChat(db,user,snapshot,requestId,text,reply.slice(0,16000),draft,snapshot.data.workRevision,baseline,{...conversation,lease,execution:resolved.execution,forgotten:draft?[]:conversation.forgotten,memories:draft?stageMemories(conversation.memories,requestId,conversation.forgotten,memories):conversation.memories});
+  if(updated){if(resolved.execution)verifyOperation(await readOperation(db,user,requestId+'-execute'),operationEffects(snapshot.data,updated.data));return Response.json(await completed(db,user,requestId,text),{headers:{'Cache-Control':'no-store'}});}
  }
- const replay=await readChatReceipt(db,user,requestId);if(replay)return Response.json(savedChat(await readWorkspace(user),requestId,text,replay));
+ const retry=await completed(db,user,requestId,text);if(retry)return Response.json(retry);
  throw new ApiError('你的安排刚刚发生了更新。输入已保留，请重试，我会按最新情况重新整理。',409);
-}catch(e){return errorResponse(e)}}
+}catch(e){if(active)await failChatRequest(active.db,active.user,active.id,active.lease,e instanceof Error?e.message:'请求失败').catch(()=>{});return errorResponse(e instanceof RequestBusy?new ApiError(e.message,409,{code:'REQUEST_BUSY'}):e)}}

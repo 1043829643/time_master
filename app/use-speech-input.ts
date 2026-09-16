@@ -3,7 +3,7 @@ import {useEffect,useRef,useState} from 'react';
 import {recordingStore,RecordingOccupiedError,RecordingConsumedError,type SavedRecording} from '@/lib/recording-store';
 import {recordingToWav} from '@/lib/audio';
 import {requestJson,errorMessage} from '@/lib/api-client';
-export function useSpeechInput(scope:string|undefined,onTranscript:(text:string,id:string)=>void,beforeRecord:()=>void){
+export function useSpeechInput(scope:string|undefined,onTranscript:(text:string,id:string)=>void|Promise<void>,beforeRecord:()=>void){
  const [phase,setPhase]=useState<'idle'|'permission'|'recording'|'recognizing'>('idle'),[seconds,setSeconds]=useState(0),[pending,setPending]=useState<SavedRecording|null>(null),[error,setError]=useState(''),[hydrated,setHydrated]=useState(false);
  const saved=useRef<SavedRecording|null>(null),generation=useRef(0),alive=useRef(false),flight=useRef<AbortController|null>(null),recorder=useRef<MediaRecorder|null>(null),stream=useRef<MediaStream|null>(null),timer=useRef<ReturnType<typeof setInterval>|null>(null),transcript=useRef(onTranscript);transcript.current=onTranscript;
  const [durable,setDurable]=useState(true),persistedId=useRef<string|null>(null);
@@ -26,7 +26,7 @@ export function useSpeechInput(scope:string|undefined,onTranscript:(text:string,
    const completed={...value,transcript:text};retain(completed);if(storageAvailable)await recordingStore(scope,'save',completed);
    if(token!==generation.current||!alive.current)return;
    // The caller durably saves the text draft before the recording is removed.
-   transcript.current(text,value.id);const delivered={...completed,delivered:true};retain(delivered);if(storageAvailable)await recordingStore(scope,'save',delivered);
+   await transcript.current(text,value.id);const delivered={...completed,delivered:true};retain(delivered);if(storageAvailable)await recordingStore(scope,'save',delivered);
    await clear(value);if(token===generation.current&&alive.current){retain(null);setError('');}
   }catch(e){if(token===generation.current&&alive.current){if(e instanceof RecordingConsumedError){retain(null);persistedId.current=null;setError(e.message)}else setError(errorMessage(e)+' 录音仍保留，可以重试或下载。');}}
   finally{if(token===generation.current&&alive.current)setPhase('idle');}

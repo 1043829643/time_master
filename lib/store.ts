@@ -7,7 +7,7 @@ import {applyOperations,emptyData,validateData,type Data,type Snapshot} from './
 import {loadWorkspace,readOperation,type OperationReceipt} from './workspace-storage';
 import {fingerprint} from './fingerprint';
 import {stable} from './changes';
-import {readMemories,constraintViolations} from './conversation-memory';
+import {readMemories,constraintViolations,memoriesForProposal} from './conversation-memory';
 import {localDay} from './domain';
 export class ApiError extends Error{constructor(message:string,public status=400,public details?:unknown){super(message)}}
 export async function owner(req:Request){const u=await getChatGPTUser();if(u)return u.userId;const host=new URL(req.url).hostname;if(process.env.NODE_ENV!=='production'&&['127.0.0.1','localhost','[::1]'].includes(host))return 'local-owner';throw new ApiError('请先登录后使用工作空间。',401);}
@@ -34,7 +34,7 @@ export async function writeWorkspace(user:string,base:number,ops:unknown,operati
   let merged;
   try{merged=origin?mergeChanges(current.data,requested,origin):requested as import('./domain').Operation[];}catch(e){if(e instanceof ChangeConflict)throw new ApiError(e.message,409,{code:'FIELD_CONFLICT',conflicts:e.conflicts,snapshot:current});if(e instanceof MergeValidationError)throw new ApiError(e.message,409,{code:'INVALID_MERGE',message:e.message,operations:e.operations,snapshot:current,conflicts:[]});throw e;}
   const warnings=changeWarnings(current.data,merged);
-  if(operationId.endsWith('-apply')){const violations=constraintViolations(current.data,merged,await readMemories(binding(),user,localDay()));if(violations.length)throw new ApiError('方案与已确认的限制不符，请调整后再应用。',409,{code:'CONSTRAINT_CONFLICT',warnings:violations,snapshot:current});}
+  if(operationId.endsWith('-apply')||operationId.endsWith('-undo')){const known=await readMemories(binding(),user,localDay()),memories=operationId.endsWith('-apply')?await memoriesForProposal(binding(),user,known,operationId.slice(0,-6)):known;const violations=constraintViolations(current.data,merged,memories);if(violations.length)throw new ApiError('方案与已确认的限制不符，请调整后再应用。',409,{code:'CONSTRAINT_CONFLICT',warnings:violations,snapshot:current});}
   if(warnings.length&&reviewedRevision!==current.data.workRevision)throw new ApiError('请核对这次修改对现有安排的影响。',409,{code:'REVIEW_REQUIRED',warnings,snapshot:current});
   const data=merged.length?applyOperations(current.data,merged,operationId,description):{...current.data,appliedIds:[...current.data.appliedIds,operationId].slice(-100)};
   if(await commitWorkspace(binding(),user,current,data,operationId,hash))return {data,revision:current.revision+1,receipt:(await readOperation(binding(),user,operationId))!};

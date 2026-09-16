@@ -14,7 +14,9 @@ export const memoryInputSchema=z.object({
  minutes:z.number().int().min(0).max(1440).nullable().default(null),
 });
 export type MemoryInput=z.infer<typeof memoryInputSchema>;
-export type ConversationMemory=MemoryInput&{id:string;sourceRequestId:string;createdAt:string};
+export type ConversationMemory=MemoryInput&{id:string;sourceRequestId:string;createdAt:string;proposedBy?:string;supersedes?:string;stagedDeletion?:boolean};
+export function stageMemories(memories:ConversationMemory[],requestId:string,forgotten:string[]=[],known:ConversationMemory[]=[]){return [...memories,...known.filter(m=>forgotten.includes(m.id)).map(m=>({...m,stagedDeletion:true}))].map((m,i)=>({...m,id:requestId+'-staged-'+i,proposedBy:requestId,supersedes:m.id}));}
+export async function memoriesForProposal(db:D1Database,owner:string,known:ConversationMemory[],id:string){const rows=await db.prepare("SELECT payload FROM conversation_memories WHERE owner=? AND state='staged' AND json_extract(payload,'$.proposedBy')=?").bind(owner,id).all<{payload:string}>();const staged=rows.results.map(r=>JSON.parse(r.payload) as ConversationMemory);return mergeMemories(known,staged.filter(m=>!m.stagedDeletion),staged.map(m=>m.supersedes||''));}
 export async function readMemories(db:D1Database,owner:string,today:string){
  const rows=await db.prepare("SELECT payload FROM conversation_memories WHERE owner=? AND state='active' ORDER BY updated_at,id").bind(owner).all<{payload:string}>();
  return rows.results.map(r=>JSON.parse(r.payload) as ConversationMemory).filter(m=>!m.date||m.date>=today);
@@ -32,10 +34,11 @@ export function prepareMemories(inputs:MemoryInput[],known:ConversationMemory[],
   if(m.rule==='not_before'&&!m.time)throw new Error('最早开始约束缺少时间。');
   if(m.rule==='travel_before'&&(!m.minutes||!data.blocks.some(b=>b.id===m.subjectId)))throw new Error('路程约束必须关联已知日程并提供分钟数。');
   const sameScope=(v:ConversationMemory)=>v.rule===m.rule&&v.subjectId===m.subjectId&&v.date===m.date;
-  const explicit=known.find(v=>v.id===m.id),matching=m.rule!=='none'?known.find(v=>sameScope(v)&&v.certainty===m.certainty):undefined;
+  const explicit=known.find(v=>v.id===m.id),matching=m.rule!=='none'?known.find(v=>sameScope(v)):undefined;
   // A one-day exception must never overwrite the standing preference. Repeated
   // updates to the same typed constraint reuse its server-owned identity.
-  const existing=explicit&&sameScope(explicit)&&explicit.certainty===m.certainty?explicit:matching;
+  const existing=explicit&&(sameScope(explicit)||!!m.subjectId&&explicit.subjectId===m.subjectId&&explicit.rule===m.rule)?explicit:matching;
+  if(m.rule==='none')m={...m,statement:m.quote};
   return {...m,id:existing?.id||requestId+'-memory-'+i,sourceRequestId:requestId,createdAt:new Date().toISOString()};
  });
 }
@@ -47,11 +50,16 @@ export function mergeMemories(known:ConversationMemory[],updates:ConversationMem
 export function memoryStatements(db:D1Database,owner:string,token:string,updates:ConversationMemory[],forgotten:string[]=[]){
  return [
   ...jsonChunks(updates).map(chunk=>db.prepare(`INSERT INTO conversation_memories(owner,id,payload,state,updated_at)
-   SELECT ?,json_extract(value,'$.id'),value,'active',? FROM json_each(?) WHERE ${commitGuard}
-   ON CONFLICT(owner,id) DO UPDATE SET payload=excluded.payload,state='active',updated_at=excluded.updated_at`).bind(owner,new Date().toISOString(),chunk,owner,token)),
+   SELECT ?,json_extract(value,'$.id'),value,CASE WHEN json_extract(value,'$.proposedBy') IS NULL THEN 'active' ELSE 'staged' END,? FROM json_each(?) WHERE ${commitGuard}
+   ON CONFLICT(owner,id) DO UPDATE SET payload=excluded.payload,state=excluded.state,updated_at=excluded.updated_at`).bind(owner,new Date().toISOString(),chunk,owner,token)),
   ...jsonChunks(forgotten).map(chunk=>db.prepare(`UPDATE conversation_memories SET state='forgotten',updated_at=? WHERE owner=? AND id IN (SELECT value FROM json_each(?)) AND ${commitGuard}`).bind(new Date().toISOString(),owner,chunk,owner,token)),
  ];
 }
+export function reconcileMemoryStatements(db:D1Database,owner:string,token:string){return [
+ db.prepare(`UPDATE conversation_memories SET state='superseded' WHERE owner=? AND state='active' AND id IN (SELECT json_extract(m.payload,'$.supersedes') FROM conversation_memories m JOIN chat_receipts c ON c.owner=m.owner AND c.request_id=json_extract(m.payload,'$.proposedBy') WHERE m.owner=? AND m.state='staged' AND c.proposal_state IN ('applied','satisfied')) AND ${commitGuard}`).bind(owner,owner,owner,token),
+ db.prepare(`UPDATE conversation_memories SET state=CASE WHEN COALESCE(json_extract(payload,'$.stagedDeletion'),0)=0 AND EXISTS(SELECT 1 FROM chat_receipts c WHERE c.owner=? AND c.request_id=json_extract(conversation_memories.payload,'$.proposedBy') AND c.proposal_state IN ('applied','satisfied')) THEN 'active' ELSE 'forgotten' END WHERE owner=? AND state='staged' AND EXISTS(SELECT 1 FROM chat_receipts c WHERE c.owner=? AND c.request_id=json_extract(conversation_memories.payload,'$.proposedBy') AND c.proposal_state<>'pending') AND ${commitGuard}`).bind(owner,owner,owner,owner,token),
+ db.prepare(`UPDATE conversation_memories SET state='forgotten' WHERE owner=? AND state='active' AND json_extract(payload,'$.subjectId')<>'' AND NOT EXISTS(SELECT 1 FROM workspace_records r WHERE r.owner=? AND r.id=json_extract(conversation_memories.payload,'$.subjectId') AND r.kind IN ('projects','tasks','blocks','contacts')) AND ${commitGuard}`).bind(owner,owner,owner,token)
+ ];}
 const minute=(s:string)=>Number(s.slice(0,2))*60+Number(s.slice(3,5));
 export function constraintViolations(data:Data,ops:Operation[],memories:ConversationMemory[]){
  const problems:string[]=[];
@@ -63,6 +71,7 @@ export function constraintViolations(data:Data,ops:Operation[],memories:Conversa
   const original=data.blocks.find(b=>b.id===block.id);
   if(!block.start||block.done)continue;
   const date=block.start.slice(0,10),task=after.tasks.find(t=>t.id===block.taskId);
+  const deadline=task?.deadlineAt||(task?.deadline?task.deadline+'T23:59':'');if(changed.has(block.id)&&deadline&&block.end>deadline)problems.push(`「${block.name}」超出硬截止 ${deadline.replace('T',' ')}。`);
   for(const m of memories){
    if(m.certainty!=='confirmed'||m.date&&m.date!==date)continue;
    if(!m.date&&memories.some(exception=>exception.certainty==='confirmed'&&exception.date===date&&exception.rule===m.rule&&exception.subjectId===m.subjectId))continue;

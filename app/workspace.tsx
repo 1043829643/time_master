@@ -1,5 +1,5 @@
 'use client';
-import {useCallback,useRef,useState} from 'react';
+import {useCallback,useEffect,useRef,useState} from 'react';
 import {useWorkspace} from './use-workspace';
 import DraftLibrary from './draft-library';
 import BackupRestore from './backup-restore';
@@ -20,12 +20,14 @@ import {dayCandidates,taskBlockers} from '@/lib/planning';
 
 export default function Workspace(){
  const {snapshot,loading,loaded,busy,notice,setNotice,notify,receive,reload,save,syncState,lastSynced,dialog}=useWorkspace();
- const [view,setView]=useState<'today'|'projects'>('today'),[agentOpen,setAgentOpen]=useState(false),[editor,setEditor]=useState<EditItem|null>(null),[date,setDate]=useState(localDay()),[projectId,setProjectId]=useState(''),[find,setFind]=useState(false),[planner,setPlanner]=useState(false),[entry,setEntry]=useState<AssistantEntry|null>(null),[accepted,setAccepted]=useState<AssistantEntry|null>(null),[filter,setFilter]=useState('');
+ const [view,setView]=useState<'today'|'projects'>('today'),[agentOpen,setAgentOpen]=useState(false),[editor,setEditor]=useState<EditItem|null>(null),[date,setDate]=useState(localDay()),[projectId,setProjectId]=useState(''),[find,setFind]=useState(false),[planner,setPlanner]=useState(false),[entries,setEntries]=useState<AssistantEntry[]>([]),[accepted,setAccepted]=useState<AssistantEntry|null>(null),[filter,setFilter]=useState('');
  const closeAssistant=useRef<()=>void>(()=>setAgentOpen(false)),data=snapshot.data,today=localDay();
- const closeEditor=useCallback(()=>setEditor(null),[]),acceptEntry=useCallback((e:AssistantEntry)=>{setAccepted(e);setEntry(current=>current?.id===e.id?null:current)},[]);
+ const entriesRef=useRef(entries);entriesRef.current=entries;
+ const closeEditor=useCallback(()=>setEditor(null),[]),acceptEntry=useCallback((e:AssistantEntry)=>{const next=entriesRef.current.filter(v=>v.id!==e.id);try{sessionStorage.setItem('time-master-handoff:'+snapshot.scope,JSON.stringify(next));entriesRef.current=next;setEntries(next);setAccepted(e)}catch{notify('文字暂存失败，原输入仍保留。',true)}},[snapshot.scope]);
+ useEffect(()=>{if(snapshot.scope)try{setEntries(JSON.parse(sessionStorage.getItem('time-master-handoff:'+snapshot.scope)||'[]'))}catch{}},[snapshot.scope]);
  const open=(item:EditItem)=>{if(!loaded)return;if(!item.draftKey&&(item.kind==='task'||item.kind==='resource')&&!data.projects.length){notify('先建一个项目来放这些事，零散想法也可以直接记下来。');setEditor({kind:'project'});return}setEditor({...item})};
  useWorkspaceTools(snapshot,open);
- function ask(text=''){setEntry({id:crypto.randomUUID(),text});setAgentOpen(true)}
+ function ask(text=''){if(text.trim()){const next=[...entriesRef.current,{id:crypto.randomUUID(),text}];try{sessionStorage.setItem('time-master-handoff:'+snapshot.scope,JSON.stringify(next));entriesRef.current=next;setEntries(next)}catch{notify('文字暂存失败，原输入仍保留。',true);return}}setAgentOpen(true)}
  function togglePlanner(){if(!planner&&date<=today)setDate(beijingNow().slice(11)>='17:45'?addDays(today,1):today);setPlanner(v=>!v)}
  function backup(){const blob=new Blob([JSON.stringify(exportBackup(data),null,2)],{type:'application/json'}),url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download='时间管理大师-'+today+'.json';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);}
  async function demo(){if(data.projects.length)return;await save(demoOperations(),'载入示例项目，可随时编辑或删除')}
@@ -34,7 +36,7 @@ export default function Workspace(){
  return <>{dialog}<div className={'app-shell quiet-shell '+(agentOpen?'with-agent':'')}>
  <div className="main-shell"><header className="quiet-topbar"><a href="#" className="quiet-brand" onClick={e=>{e.preventDefault();setView('today')}}><Leaf size={22}/><span>时间管理大师</span></a>
   <nav className="primary-nav" aria-label="主要入口"><button aria-current={view==='today'?'page':undefined} className={view==='today'?'active':''} onClick={()=>setView('today')}>今天</button><button aria-current={view==='projects'?'page':undefined} className={view==='projects'?'active':''} onClick={()=>setView('projects')}>项目全景</button></nav>
-  <div className="quiet-tools"><button className="icon-button" disabled={!loaded} aria-label="找人、文件或事情" title="找人、文件或事情" onClick={()=>setFind(true)}><Search size={19}/></button><button className={'icon-button '+(agentOpen?'selected':'')} aria-label="打开时间伙伴" title="聊一聊，也可以用语音" disabled={!loaded} onClick={()=>agentOpen?closeAssistant.current():ask()}><AudioLines size={20}/></button><details className="utility-menu"><summary aria-label="工作空间工具"><SlidersHorizontal size={18}/></summary><div className="utility-content"><span className="sync-caption">{busy?'正在保存':syncState==='synced'?'已同步 · '+lastSynced:syncState==='offline'?'离线，尚未同步':'正在连接'}</span><button className="text-button" disabled={busy||loading} onClick={reload}><RefreshCw size={15}/>刷新数据</button><button className="text-button" disabled={!loaded} onClick={backup}><Download size={15}/>导出备份</button>{loaded&&<><DraftLibrary open={open}/><BackupRestore receive={receive} notify={notify} disabled={busy}/></>}</div></details></div>
+  <div className="quiet-tools"><button className="icon-button" disabled={!loaded} aria-label="找人、文件或事情" title="找人、文件或事情" onClick={()=>setFind(true)}><Search size={19}/></button><button className={'icon-button '+(agentOpen?'selected':'')} aria-label="打开时间伙伴" title="聊一聊，也可以用语音" disabled={!loaded} onClick={()=>agentOpen?closeAssistant.current():ask()}><AudioLines size={20}/></button><details className="utility-menu"><summary aria-label="工作空间工具"><SlidersHorizontal size={18}/></summary><div className="utility-content"><span className="sync-caption">{busy?'正在保存':syncState==='synced'?'已同步 · '+lastSynced:syncState==='offline'?'离线，尚未同步':'正在连接'}</span><button className="text-button" disabled={busy||loading} onClick={reload}><RefreshCw size={15}/>刷新数据</button><button className="text-button" disabled={!loaded} onClick={backup}><Download size={15}/>导出备份</button>{loaded&&<><DraftLibrary open={open} scope={snapshot.scope||''}/><BackupRestore receive={receive} notify={notify} disabled={busy}/></>}</div></details></div>
  </header>
  <main className="quiet-main">
  {notice&&<div className={'notice '+(notice.error?'error':'')} role={notice.error?'alert':'status'}>{notice.error?<AlertCircle size={17}/>:<CheckCircle2 size={17}/>}<span>{notice.text}</span><button className="icon-button" onClick={()=>setNotice(null)} aria-label="关闭提示"><X size={15}/></button></div>}
@@ -51,9 +53,9 @@ export default function Workspace(){
   {data.projects.length?<><div className="panorama-tools"><label className="search-box"><Search size={16}/><input aria-label="筛选项目与事项" placeholder="找一个项目或事项" value={filter} onChange={e=>setFilter(e.target.value)}/></label></div><Timeline data={data} filter={filter} editTask={t=>open({kind:'task',id:t.id})} editProject={p=>setProjectId(p.id)} addTask={id=>open({kind:'task',projectId:id})}/><div className="project-shortcuts">{data.projects.filter(p=>!filter||p.name.toLocaleLowerCase().includes(filter.toLocaleLowerCase())||data.tasks.some(t=>t.projectId===p.id&&t.name.toLocaleLowerCase().includes(filter.toLocaleLowerCase()))).map(p=><button key={p.id} onClick={()=>setProjectId(p.id)}>{p.name}<span>{data.tasks.filter(t=>t.projectId===p.id&&t.status!=='done').length} 件待推进</span></button>)}</div></>:<div className="quiet-empty project-empty"><h2>手上有什么项目？</h2><p>可以先建一个，也可以直接和时间伙伴聊。</p><div className="row"><button className="primary" onClick={()=>open({kind:'project'})}>创建项目</button><button className="text-button" disabled={busy} onClick={demo}>看看示例</button></div></div>}
  </>}
  </main></div>
- {loaded&&<Assistant visible={agentOpen} entry={entry} onEntryAccepted={acceptEntry} closeRequest={closeAssistant} snapshot={snapshot} receive={receive} save={save} globalBusy={busy} close={()=>setAgentOpen(false)}/>}
+ {loaded&&<Assistant key={snapshot.scope} visible={agentOpen} entry={entries[0]} onEntryAccepted={acceptEntry} closeRequest={closeAssistant} snapshot={snapshot} receive={receive} save={save} globalBusy={busy} close={()=>setAgentOpen(false)}/>}
  {find&&<FindAnything data={data} close={()=>setFind(false)} open={open} project={setProjectId}/>}
  {projectId&&<ProjectContext {...shared} projectId={projectId} close={()=>setProjectId('')}/>}
- {editor&&<Editor key={editor.draftKey||editor.kind+(editor.id||'new')} item={editor} data={data} busy={busy} close={closeEditor} save={save} receive={receive}/>}
+ {editor&&<Editor key={editor.draftKey||editor.kind+(editor.id||'new')} item={editor} scope={snapshot.scope||''} data={data} busy={busy} close={closeEditor} save={save} receive={receive}/>}
  </div></>;
 }

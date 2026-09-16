@@ -2,15 +2,16 @@ import {z} from 'zod';
 import {applyOperations,operationSchema,localDay,type Data} from './domain.ts';
 import {relativeDate} from './conversation-dates.ts';
 import {describeChanges} from './planning.ts';
-import {stable,mergeChanges} from './changes.ts';
+import {stable,mergeChanges,records,type Kind} from './changes.ts';
 import {effectiveOperations,targetOf,type PlanTransition} from './proposal-lifecycle.ts';
 import {memoryInputSchema,prepareMemories,mergeMemories,constraintViolations,type ConversationMemory} from './conversation-memory.ts';
 import {type ReviewablePlan} from './proposal-review.ts';
 import {dayPlanSchema,makeDayPlan} from './daily-planning.ts';
 
 export const conversationSchema=z.object({
+ execution:z.object({mode:z.enum(['execute','preview','reply','confirm']),quote:z.string(),proposalId:z.string().optional()}).optional(),
  responses:z.array(z.object({quote:z.string().min(1),kind:z.enum(['read','change','withdraw','preference','constraint','social','status']),answer:z.string().max(6000).default(''),dayPlan:dayPlanSchema.nullable().optional(),operations:z.array(operationSchema.and(z.object({changedFields:z.array(z.string()).optional()}))).max(30).default([])})).min(1).max(12),
- planUpdates:z.array(z.object({id:z.string(),action:z.enum(['supersede','dismiss']),quote:z.string().min(1)})).max(20).default([]),
+ planUpdates:z.array(z.object({id:z.string(),action:z.enum(['supersede','dismiss']),quote:z.string().min(1),excludeTargets:z.array(z.object({kind:z.string(),id:z.string(),quote:z.string().min(1)})).default([])})).max(20).default([]),
  memories:z.array(memoryInputSchema).max(12).default([]),
  forgetMemories:z.array(z.object({id:z.string(),quote:z.string().min(1)})).max(12).default([]),
 });
@@ -27,6 +28,8 @@ export function parseConversation(message:any,data:Data,requestId:string,text:st
  for(const m of Array.isArray(args.memories)?args.memories:[])if(m.id===null||m.id==='')delete m.id;
  for(const r of Array.isArray(args.responses)?args.responses:[]){if(typeof r.operations==='string')r.operations=JSON.parse(r.operations);for(const op of Array.isArray(r.operations)?r.operations:[])if(op.type?.endsWith('.save')&&op.id&&op.data&&typeof op.data==='object'&&!op.data.id)op.data.id=op.id;}
  const turn=conversationSchema.parse(args);
+ if(turn.execution?.quote&&!text.includes(turn.execution.quote))throw new Error('执行依据必须逐字引用用户原话。');
+ if(turn.execution?.mode==='execute'&&/(?:先别|暂时别|先不|不要|不用).{0,5}(?:改|存|执行|安排)|先.{0,3}(?:看看|看下|预览)|只.{0,3}(?:建议|总结)/.test(text))throw new Error('用户尚未要求执行，请使用 preview 或 reply。');
  const replacesDaySlot=(op:{type:string;data?:unknown})=>op.type==='block.save'&&!(op.data as any)?.fixed&&turn.responses.some(r=>r.dayPlan&&(op.data as any)?.start?.startsWith(r.dayPlan.date));
  if(turn.responses.filter(r=>r.dayPlan).length>1)throw new Error('每轮只提交一份综合日程建议。');
  for(const r of turn.responses)if(r.dayPlan){
@@ -41,10 +44,14 @@ export function parseConversation(message:any,data:Data,requestId:string,text:st
   const b=op.data as any;if(b&&!b.contactId){const people=data.contacts.filter(c=>b.name?.includes(c.name));if(people.length===1)b.contactId=people[0].id;}
  }
  for(const r of turn.responses)for(const op of r.operations)if(op.type==='capture.save'&&!data.captures.some(c=>c.id===(op.data as any)?.id)){const c=op.data as any;op.data={...c,notes:r.quote,createdAt:new Date().toISOString()};}
+ for(const r of turn.responses)if(/补一句|补充|追加|加一句|添一句/.test(r.quote)&&!/替换|覆盖|删掉|改成/.test(r.quote))for(const op of r.operations){
+  if(!op.type.endsWith('.save'))continue;const value=op.data as any,old=records(data,op.type.split('.')[0] as Kind).find(v=>v.id===value?.id);
+  for(const field of ['notes','description','purpose','result'])if(old?.[field]&&typeof value?.[field]==='string'&&!value[field].includes(old[field]))throw new Error('用户要求追加'+field+'，必须保留现有原文并追加，不能覆盖。');
+ }
  const quoted=(q:string)=>{if(!text.includes(q))throw new Error('意图和记忆的 quote 必须逐字引用本轮用户的话。')};
  for(const r of turn.responses){const expected=relativeDate(r.quote,localDay());const dated=r.operations.filter(o=>o.type.endsWith('.save')&&((o.data as any)?.start||(o.data as any)?.dueAt||(o.data as any)?.reviewOn));if(expected&&dated.length&&!dated.some(o=>{const v=o.data as any;return [v.start,v.end,v.dueAt,v.reviewOn].some(s=>s?.startsWith(expected))}))throw new Error('本轮原话的相对日期应为 '+expected+'，请依据提供的日历表修正安排。');}
  const explicitFields=new Map(turn.responses.flatMap(r=>r.operations.map(op=>[key(op),op.changedFields||[]] as const)));
- let ops=turn.responses.flatMap(r=>{quoted(r.quote);if(r.kind!=='change'&&r.kind!=='withdraw'&&r.operations.length)throw new Error('只读意图不能包含修改：响应 kind='+r.kind+' 却包含 '+r.operations.map(o=>o.type).join(',')+'。报告资料到齐、改跟进状态也是业务修改，必须把这个响应的kind改为change；status仅用于查询已保存摘要。不要删除用户要求的操作。');if(r.kind==='withdraw'&&r.operations.some(o=>!o.type.endsWith('.delete')))throw new Error('withdraw只能删除已保存记录，保存其他新安排应使用change意图。');return r.operations.map(({changedFields,...op})=>op)});
+ let ops=turn.responses.flatMap(r=>{quoted(r.quote);if(r.kind!=='change'&&r.kind!=='withdraw'&&r.operations.length)throw new Error('只读意图不能包含修改：请将报告进展、归档、取消等修改归为change。');return r.operations.map(({changedFields,...op})=>op)});
  if(turn.responses.some(r=>r.operations.length&&summaryOnly(r.quote))||summaryOnly(text)&&ops.length&&!turn.responses.some(r=>r.operations.length&&!summaryOnly(r.quote)&&/(?:改到|安排|新增|删除|取消|挪到|改成)/.test(r.quote)))throw new Error('用户要求只总结或不改安排，本轮不能提出写入方案。');
  if(ops.some(o=>o.type==='message.add'))throw new Error('不能修改聊天记录。');
  const transitions:PlanTransition[]=[];
@@ -55,6 +62,7 @@ export function parseConversation(message:any,data:Data,requestId:string,text:st
   if(!old)throw new Error('要替换或撤回的方案不是当前待确认方案。已经应用的方案不能 supersede/dismiss，修改已保存记录只需 operations。当前可更新方案：'+pending.map(p=>p.id).join('、'));
   if(transitions.some(t=>t.id===update.id.replace(/-apply$/,'')))throw new Error('不能重复更新同一方案。');
   if(update.action==='supersede'){
+   for(const excluded of update.excludeTargets){quoted(excluded.quote);if(!old.operations.some(o=>key(o)===excluded.kind+':'+excluded.id))throw new Error('排除条目必须属于被替换方案。');}
    if(!ops.length)throw new Error('替换方案需要提供新安排；单纯不要了应使用 dismiss。');
    for(const next of ops){
     const previous=old.operations.find(o=>key(o)===key(next));
@@ -67,7 +75,7 @@ export function parseConversation(message:any,data:Data,requestId:string,text:st
     }
    }
    // A partial correction carries forward the independent parts of that plan.
-   const targets=new Set(ops.map(key)),carried=old.baseline?mergeChanges(data,old.operations,old.baseline):old.operations;ops.push(...carried.filter(o=>!targets.has(key(o))&&!replacesDaySlot(o)));
+   const targets=new Set([...ops.map(key),...update.excludeTargets.map(t=>t.kind+':'+t.id)]),carried=old.baseline?mergeChanges(data,old.operations,old.baseline):old.operations;ops.push(...carried.filter(o=>!targets.has(key(o))&&!replacesDaySlot(o)));
   }
   transitions.push({id:update.id.replace(/-apply$/,''),state:update.action==='dismiss'?'dismissed':'superseded',reason:'根据你的新决定：'+update.quote,...(update.action==='supersede'?{replacementId:requestId}:{})});
  }
@@ -75,29 +83,38 @@ export function parseConversation(message:any,data:Data,requestId:string,text:st
  if(ops.some(op=>retained.some(p=>p.operations.some(old=>key(old)===key(op)&&stable(old)!==stable(op)))))throw new Error('正在修改已有待确认安排，必须通过 planUpdates 替换原方案，不能让冲突版本同时有效。');
  // Repeating an unchanged pending operation must not produce a second card.
  ops=ops.filter(op=>!retained.some(p=>p.operations.some(old=>stable(old)===stable(op))));
+ if(turn.execution?.mode==='confirm'&&ops.length)throw new Error('确认原方案时 operations 必须为空，不得重新生成。');
  const targets=ops.map(key);if(new Set(targets).size!==targets.length)throw new Error('同一条记录有重复修改，请合并成最终决定。');
+ // Waiting caused by materials is derived from followups. Do not add a
+ // second manual block that would survive resolving the followup.
+ for(const op of ops)if(op.type==='task.save'&&(op.data as any)?.status==='waiting'){
+  const id=(op.data as any).id,blocking=ops.some(f=>f.type==='followup.save'&&(f.data as any)?.taskId===id&&(f.data as any)?.blocksTask&&(f.data as any)?.status!=='resolved'&&(f.data as any)?.status!=='cancelled');
+  if(blocking&&!/(?:手动|设为|标为|状态改为).{0,4}等待/.test(text)&&data.tasks.find(t=>t.id===id)?.status!=='waiting'){const value={...op.data as any};delete value.status;op.data=value}
+ }
  ops=effectiveOperations(data,ops);
  if(ops.length>30)throw new Error('一次最多30项修改。');
  if(ops.length)applyOperations(data,ops,'validate-'+requestId);
  // Only the server assigns new memory IDs. An invented provider key can never
  // overwrite a memory outside the exact supplied owner context.
- const memories=prepareMemories(turn.memories.map(m=>m.id&&known.some(k=>k.id===m.id)?m:{...m,id:undefined}),known,text,requestId,data);
+ const projected=ops.length?applyOperations(data,ops,'memory-preview-'+requestId):data;
+ const memories=prepareMemories(turn.memories.map(m=>m.id&&known.some(k=>k.id===m.id)?m:{...m,id:undefined}),known,text,requestId,projected);
  const forgotten=turn.forgetMemories.map(f=>{quoted(f.quote);if(!known.some(m=>m.id===f.id))throw new Error('无法忘记不存在的记忆。');return f.id});
  if(memories.some(m=>forgotten.includes(m.id)))throw new Error('同一条记忆不能同时更新和遗忘。');
  const violations=constraintViolations(data,ops,mergeMemories(known,memories,forgotten));
  if(violations.length)throw new Error('安排违反用户已确认的限制，请重新计算可行时间或询问，不要提供不可能的安排：'+violations.join('；'));
  const draft=ops.length?{summary:describeChanges(data,ops),operations:ops}:null;
  if(!draft&&transitions.some(t=>t.state==='superseded'))throw new Error('没有实际新变更，不能声称生成替换方案。');
- let reply=turn.responses.map(r=>{
+ const replyParts=turn.responses.map(r=>{
   // Action receipts and saved-state summaries are compiled from records, not
   // free prose. Other intent answers retain their conversational wording.
   const asksStatus=r.kind==='read'&&/收个尾|存了什么|哪些.{0,12}(?:存|确认)|还要点|当前.{0,12}(?:保存|确认)/.test(r.quote)&&!/(?:哪台|文件|工程|联系|微信)/.test(r.quote);
-  if(r.kind==='status'||asksStatus)return savedStatusSummary(data,[...retained,...(draft?[{...draft,id:requestId+'-apply',workRevision:data.workRevision}]:[])]);
+  if(asksStatus||r.kind==='status'&&/(?:存了什么|哪些.{0,12}(?:存|确认)|当前.{0,12}(?:保存|确认))/.test(r.quote))return savedStatusSummary(data,[...retained,...(draft?[{...draft,id:requestId+'-apply',workRevision:data.workRevision}]:[])]);
   if((r.kind==='change'||r.kind==='withdraw')&&r.operations.length){const keys=new Set(r.operations.map(key)),actual=ops.filter(o=>keys.has(key(o)));return actual.length?describeChanges(data,actual):'这部分已在当前安排或现有待确认方案中，无需重复创建。';}
   return r.answer.trim();
- }).filter((v,i,a)=>a.indexOf(v)===i).join('\n\n');
+ });
+ let reply=replyParts.filter((v,i,a)=>a.indexOf(v)===i).join('\n\n');
+ const information=replyParts.filter((v,i)=>!turn.responses[i].operations.length).join('\n\n');
  if(!draft&&!retained.length&&/(?:这(?:条|份|些|个)|本次).{0,35}(?:待确认|应用才|点应用)|我把(?:项目|日程|事项|会议|待办).{0,70}(?:改成|安排|创建|删除)|已为你(?:安排|创建|删除).{0,15}(?:日程|事项|项目)/.test(reply))throw new Error('回复声称生成了修改或要求应用，但本轮没有任何方案。若只是记住用户的更正，就说明已记住，不要声称修改项目或生成方案。');
- if(/(?:回一句|回复|你说|说)[“「"']?应用[”」"']?(?:我就|才会|即可|就会|就能)/.test(reply))throw new Error('本产品需要点击待确认方案中的应用按钮，回复“应用”不会执行保存。请修正操作说明。');
  const awaiting=new Set([...retained.flatMap(p=>p.operations),...ops].map(key));
  for(const clause of reply.split(/[。；\n]/)){
   if(/不是待确认|并非待确认|不再.{0,3}待确认/.test(clause))continue;
@@ -107,7 +124,7 @@ export function parseConversation(message:any,data:Data,requestId:string,text:st
  }
  if(draft)reply+='\n\n新安排已整理为待确认方案，应用后才会保存。';
  if(!reply.trim())throw new Error('请给用户一句自然的回应，不能只返回空答案。');
- return {reply,draft,conversation:{memories,forgotten,transitions,audit:{intents:turn.responses.map(({quote,kind})=>({quote,kind})),planUpdates:turn.planUpdates}}};
+ return {reply,draft,information,execution:turn.execution||{mode:'preview' as const,quote:''},conversation:{memories,forgotten,transitions,audit:{intents:turn.responses.map(({quote,kind})=>({quote,kind})),planUpdates:turn.planUpdates}}};
 }
 
 function savedStatusSummary(data:Data,pending:ReviewablePlan[]){
@@ -118,10 +135,11 @@ function savedStatusSummary(data:Data,pending:ReviewablePlan[]){
  return '当前已经保存：\n'+(tasks.length?tasks.join('\n'):'暂无事项。')+(data.tasks.length>12?'\n另有 '+(data.tasks.length-12)+' 件事项，可在项目全景查看。':'')+'\n\n已保存日程：\n'+(blocks.length?blocks.join('\n'):'暂无日程。')+(data.blocks.length>12?'\n另有 '+(data.blocks.length-12)+' 段日程，可在我的日程查看。':'')+extras+'\n\n待确认：'+(pending.length?'\n'+pending.slice(0,8).map(p=>'• '+p.summary).join('\n')+(pending.length>8?'\n另有 '+(pending.length-8)+' 份方案。':'')+'\n点击待确认方案中的应用按钮后才会保存。':'目前没有待确认方案。');
 }
 
-export const conversationTool={type:'function',function:{name:'respond_to_user',description:'完整回应本轮所有意图：同时回答问题、给出修改草案、撤回旧方案和记住用户明确说出的事实。操作不会自动应用。',parameters:zodParameters()}};
+export const conversationTool={type:'function',function:{name:'respond_to_user',description:'完整回应本轮所有意图，并明确用户要求执行、预览、查询或确认原方案。',parameters:zodParameters()}};
 function zodParameters(){return {type:'object',properties:{
+ execution:{type:'object',properties:{mode:{type:'string',enum:['execute','preview','reply','confirm']},quote:{type:'string'},proposalId:{type:'string'}},required:['mode','quote']},
  responses:{type:'array',items:{type:'object',properties:{quote:{type:'string',description:'本轮用户的连续原话，逐字引用。'},kind:{type:'string',enum:['read','change','withdraw','preference','social','status']},answer:{type:'string'},dayPlan:{type:['object','null'],description:'按明确时间窗与新增投入自动挑事；填写时operations留空',properties:{date:{type:'string'},start:{type:'string'},end:{type:'string'},minutes:{type:'integer'},energy:{type:'string',enum:['focus','light']}},required:['date','start','end','minutes','energy']},operations:{type:'array',items:{type:'object',properties:{type:{type:'string',enum:['project.save','project.delete','task.save','task.delete','block.save','block.delete','contact.save','contact.delete','resource.save','resource.delete','capture.save','capture.delete','followup.save','followup.delete']},id:{type:'string'},changedFields:{type:'array',items:{type:'string'},description:'用户明确更改的字段名，用于保留同一记录中其他待确认决定。'},data:{type:'object'}},required:['type']}}},required:['quote','kind','answer','operations']}},
- planUpdates:{type:'array',items:{type:'object',properties:{id:{type:'string'},action:{type:'string',enum:['supersede','dismiss']},quote:{type:'string'}},required:['id','action','quote']}},
+ planUpdates:{type:'array',items:{type:'object',properties:{id:{type:'string'},action:{type:'string',enum:['supersede','dismiss']},quote:{type:'string'},excludeTargets:{type:'array',items:{type:'object',properties:{kind:{type:'string'},id:{type:'string'},quote:{type:'string'}},required:['kind','id','quote']}}},required:['id','action','quote']}},
  memories:{type:'array',items:{type:'object',properties:{id:{type:'string'},kind:{type:'string',enum:['preference','constraint','context','open_request']},statement:{type:'string'},quote:{type:'string'},certainty:{type:'string',enum:['confirmed','tentative']},date:{type:['string','null']},subjectId:{type:'string'},rule:{type:'string',enum:['not_before','travel_before','none']},time:{type:['string','null']},minutes:{type:['number','null']}},required:['kind','statement','quote','certainty','date','subjectId','rule','time','minutes']}},
  forgetMemories:{type:'array',items:{type:'object',properties:{id:{type:'string'},quote:{type:'string'}},required:['id','quote']}},
- },required:['responses','planUpdates','memories','forgetMemories']};}
+ },required:['execution','responses','planUpdates','memories','forgetMemories']};}
