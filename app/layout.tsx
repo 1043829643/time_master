@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import "./globals.css";
 import "./theme.css";
+import "./compact.css";
 
 export const metadata: Metadata = {
   title: "时间管理大师",
