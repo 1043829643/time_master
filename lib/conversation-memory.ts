@@ -1,6 +1,7 @@
 import {z} from 'zod';
 import {applyOperations,localDay,addDays,type Data,type Operation} from './domain.ts';
 import {commitGuard,jsonChunks} from './workspace-storage.ts';
+import {originalQuote} from './quote-evidence.ts';
 
 const day=z.string().regex(/^\d{4}-\d{2}-\d{2}$/).refine(v=>{const d=new Date(v+'T00:00:00Z');return !isNaN(d.getTime())&&d.toISOString().slice(0,10)===v},'日期无效');
 export const memoryInputSchema=z.object({
@@ -24,7 +25,9 @@ export async function readMemories(db:D1Database,owner:string,today:string){
 export function prepareMemories(inputs:MemoryInput[],known:ConversationMemory[],text:string,requestId:string,data:Data):ConversationMemory[]{
  const subjects=new Set(['',...data.projects.map(v=>v.id),...data.tasks.map(v=>v.id),...data.blocks.map(v=>v.id),...data.contacts.map(v=>v.id)]);
  return inputs.map((m,i)=>{
-  if(!text.includes(m.quote))throw new Error('记忆必须引用本轮用户原话，不能用助手推断作证据。');
+  const evidence=originalQuote(text,m.quote);
+  if(evidence===null)throw new Error('记忆必须引用本轮用户原话，不能用助手推断作证据。');
+  m={...m,quote:evidence};
   if(m.id&&!known.some(v=>v.id===m.id))throw new Error('要更新的记忆不在当前上下文中。');
   if(!subjects.has(m.subjectId))throw new Error('记忆引用了不存在的对象。');
   // A model may generalize one scheduling choice into an enduring habit. Only

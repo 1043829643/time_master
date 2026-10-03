@@ -1,12 +1,13 @@
 import {z} from 'zod';
 import {applyOperations,operationSchema,localDay,type Data} from './domain.ts';
-import {relativeDate} from './conversation-dates.ts';
+import {requiredRelativeDates} from './conversation-dates.ts';
 import {describeChanges} from './planning.ts';
 import {stable,mergeChanges,records,type Kind} from './changes.ts';
 import {effectiveOperations,targetOf,type PlanTransition} from './proposal-lifecycle.ts';
 import {memoryInputSchema,prepareMemories,mergeMemories,constraintViolations,type ConversationMemory} from './conversation-memory.ts';
 import {type ReviewablePlan} from './proposal-review.ts';
 import {dayPlanSchema,makeDayPlan} from './daily-planning.ts';
+import {originalQuote} from './quote-evidence.ts';
 
 export const conversationSchema=z.object({
  execution:z.object({mode:z.enum(['execute','preview','reply','confirm']),quote:z.string(),proposalId:z.string().optional()}).optional(),
@@ -17,6 +18,11 @@ export const conversationSchema=z.object({
 });
 const key=(op:Parameters<typeof targetOf>[0])=>{const t=targetOf(op);return t.kind+':'+t.id};
 const summaryOnly=(s:string)=>/(?:只|就)(?:帮我)?(?:总结|收个尾|梳理现状)|别(?:再)?(?:出方案|改安排|修改)|不要(?:修改|出方案|改动)/.test(s);
+const clearAction=/(?:帮我|给我|请|替我|直接|现在|顺便)(?:把|将)?[^，,。；;]{0,40}(?:安排|新增|新建|创建|改到|改成|挪到|取消|删除|保存|存下|记下|添加)|(?:然后|接着|再)(?:把|将)[^，,。；;]{0,40}(?:安排|新增|新建|创建|改到|改成|挪到|取消|删除|保存|存下|记下|添加)/;
+function unresolvedDeferral(value:string){
+ const deferrals=[...value.matchAll(/(?:先别|暂时别|先不|不要|不用).{0,5}(?:动|碰|改|存|执行|安排|应用|提交)|别(?:应用|提交|保存)|别急着.{0,5}(?:动|改|存|执行|安排|应用|提交)|(?:先|再).{0,3}(?:看看|看下|预览|聊聊|谈谈|讨论|商量|想想)|只.{0,3}(?:建议|总结)/g)];
+ const last=deferrals.at(-1);return !!last&&!clearAction.test(value.slice((last.index||0)+last[0].length));
+}
 
 // Validate the whole turn before committing any answer, memory, or plan state.
 export function parseConversation(message:any,data:Data,requestId:string,text:string,pending:ReviewablePlan[],known:ConversationMemory[],closedPlans:{request_id:string;proposal_state:string}[]=[]){
@@ -28,8 +34,18 @@ export function parseConversation(message:any,data:Data,requestId:string,text:st
  for(const m of Array.isArray(args.memories)?args.memories:[])if(m.id===null||m.id==='')delete m.id;
  for(const r of Array.isArray(args.responses)?args.responses:[]){if(typeof r.operations==='string')r.operations=JSON.parse(r.operations);for(const op of Array.isArray(r.operations)?r.operations:[])if(op.type?.endsWith('.save')&&op.id&&op.data&&typeof op.data==='object'&&!op.data.id)op.data.id=op.id;}
  const turn=conversationSchema.parse(args);
- if(turn.execution?.quote&&!text.includes(turn.execution.quote))throw new Error('执行依据必须逐字引用用户原话。');
- if(turn.execution?.mode==='execute'&&/(?:先别|暂时别|先不|不要|不用).{0,5}(?:改|存|执行|安排)|先.{0,3}(?:看看|看下|预览)|只.{0,3}(?:建议|总结)/.test(text))throw new Error('用户尚未要求执行，请使用 preview 或 reply。');
+ const quote=(value:string,field:string)=>{
+  const evidence=originalQuote(text,value);
+  if(evidence===null)throw new Error(field+' 必须逐字引用本轮用户原话，不能概括或重组。');
+  return evidence;
+ };
+ if(turn.execution?.quote)turn.execution.quote=quote(turn.execution.quote,'执行依据');
+ for(const r of turn.responses)r.quote=quote(r.quote,'意图 quote');
+ for(const update of turn.planUpdates){update.quote=quote(update.quote,'方案更新 quote');for(const excluded of update.excludeTargets)excluded.quote=quote(excluded.quote,'排除条目 quote')}
+ for(const m of turn.memories)m.quote=quote(m.quote,'记忆 quote');
+ for(const forgotten of turn.forgetMemories)forgotten.quote=quote(forgotten.quote,'忘记记忆 quote');
+ if(turn.execution?.mode==='execute'&&(unresolvedDeferral(text)||unresolvedDeferral(turn.execution.quote)||turn.responses.some(r=>r.operations.length&&unresolvedDeferral(r.quote))))throw new Error('用户尚未要求执行，请使用 preview 或 reply。');
+ if(turn.execution?.mode==='confirm'&&turn.planUpdates.length)throw new Error('确认原方案不能同时撤回或替换方案；请按用户最终决定重新梳理。');
  const replacesDaySlot=(op:{type:string;data?:unknown})=>op.type==='block.save'&&!(op.data as any)?.fixed&&turn.responses.some(r=>r.dayPlan&&(op.data as any)?.start?.startsWith(r.dayPlan.date));
  if(turn.responses.filter(r=>r.dayPlan).length>1)throw new Error('每轮只提交一份综合日程建议。');
  for(const r of turn.responses)if(r.dayPlan){
@@ -48,8 +64,17 @@ export function parseConversation(message:any,data:Data,requestId:string,text:st
   if(!op.type.endsWith('.save'))continue;const value=op.data as any,old=records(data,op.type.split('.')[0] as Kind).find(v=>v.id===value?.id);
   for(const field of ['notes','description','purpose','result'])if(old?.[field]&&typeof value?.[field]==='string'&&!value[field].includes(old[field]))throw new Error('用户要求追加'+field+'，必须保留现有原文并追加，不能覆盖。');
  }
- const quoted=(q:string)=>{if(!text.includes(q))throw new Error('意图和记忆的 quote 必须逐字引用本轮用户的话。')};
- for(const r of turn.responses){const expected=relativeDate(r.quote,localDay());const dated=r.operations.filter(o=>o.type.endsWith('.save')&&((o.data as any)?.start||(o.data as any)?.dueAt||(o.data as any)?.reviewOn));if(expected&&dated.length&&!dated.some(o=>{const v=o.data as any;return [v.start,v.end,v.dueAt,v.reviewOn].some(s=>s?.startsWith(expected))}))throw new Error('本轮原话的相对日期应为 '+expected+'，请依据提供的日历表修正安排。');}
+ const quoted=(q:string)=>{if(!text.includes(q))throw new Error('意图和记忆的 quote 必须逐字引用本轮用户的话。无效 quote：'+JSON.stringify(q.slice(0,160))+'；请从本轮原话复制连续片段，不要概括或重组。')};
+ for(const r of turn.responses){
+  const expected=requiredRelativeDates(r.quote,localDay());
+  const evidence=r.operations.flatMap(o=>{
+   if(o.type.endsWith('.save')){const v=o.data as any;return [v?.start,v?.end,v?.dueAt,v?.reviewOn].filter((s):s is string=>typeof s==='string'&&!!s)}
+   if(o.type==='block.delete'){const v=data.blocks.find(b=>b.id===o.id);return v?[v.start,v.end]:[]}
+   if(o.type==='followup.delete'){const v=data.followups.find(f=>f.id===o.id);return v?.dueAt?[v.dueAt]:[]}
+   return [] as string[];
+  });
+  for(const date of expected)if(evidence.length&&!evidence.some(value=>value.startsWith(date)))throw new Error('本轮原话包含相对日期 '+date+'，请依据提供的日历表核对每项安排。');
+ }
  const explicitFields=new Map(turn.responses.flatMap(r=>r.operations.map(op=>[key(op),op.changedFields||[]] as const)));
  let ops=turn.responses.flatMap(r=>{quoted(r.quote);if(r.kind!=='change'&&r.kind!=='withdraw'&&r.operations.length)throw new Error('只读意图不能包含修改：请将报告进展、归档、取消等修改归为change。');return r.operations.map(({changedFields,...op})=>op)});
  if(turn.responses.some(r=>r.operations.length&&summaryOnly(r.quote))||summaryOnly(text)&&ops.length&&!turn.responses.some(r=>r.operations.length&&!summaryOnly(r.quote)&&/(?:改到|安排|新增|删除|取消|挪到|改成)/.test(r.quote)))throw new Error('用户要求只总结或不改安排，本轮不能提出写入方案。');

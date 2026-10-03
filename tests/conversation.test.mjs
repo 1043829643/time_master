@@ -7,7 +7,7 @@ import {parseConversation} from '../lib/conversation-response.ts';
 import {memoryInputSchema,prepareMemories,readMemories,constraintViolations} from '../lib/conversation-memory.ts';
 import {commitChat,readChatReceipt,commitWorkspace,allPendingPlans} from '../lib/chat-state.ts';
 import {commitRestore} from '../lib/restore-state.ts';
-import {relativeDate} from '../lib/conversation-dates.ts';
+import {relativeDate,requiredRelativeDates,assertRelativeDateClaims} from '../lib/conversation-dates.ts';
 const block=(id='b',start='10:00',fixed=false)=>({type:'block.save',data:{id,name:'工作'+id,taskId:'',start:'2026-09-17T'+start,end:'2026-09-17T11:00',fixed,done:false}});
 const tool=(responses,more={})=>({tool_calls:[{function:{name:'respond_to_user',arguments:JSON.stringify({responses,planUpdates:[],memories:[],forgetMemories:[],...more})}}]});
 const response=(kind,quote,answer,operations=[])=>({kind,quote,answer,operations});
@@ -22,6 +22,26 @@ test('一次不放日历的决定不能被泛化成全局长期偏好',()=>{
  const [standing]=prepareMemories([habitual],[],habitual.quote,'habit',emptyData());assert.equal(standing.kind,'preference');assert.equal(standing.date,null);
 });
 test('下周一与跨年相对日期由程序换算',()=>{assert.equal(relativeDate('下周一验收','2026-09-16'),'2026-09-21');assert.equal(relativeDate('下周一','2026-12-30'),'2027-01-04');assert.equal(relativeDate('后天','2026-12-31'),'2027-01-02')});
+test('并列日期逐一核对；改期和临时改口只要求最后的目标日期',t=>{
+ t.mock.timers.enable({apis:['Date'],now:new Date('2026-09-16T04:00:00Z')});
+ assert.deepEqual(requiredRelativeDates('明天十点见小林，后天十一点发材料','2026-09-16'),['2026-09-17','2026-09-18']);
+ assert.deepEqual(requiredRelativeDates('把明天的会改到后天','2026-09-16'),['2026-09-18']);
+ assert.deepEqual(requiredRelativeDates('明天开会，不对，后天开会','2026-09-16'),['2026-09-18']);
+ assert.deepEqual(requiredRelativeDates('明天或后天都行，你来选','2026-09-16'),[]);
+ assert.throws(()=>assertRelativeDateClaims('下周六或下周一上午有没有空','下周一（2026-10-12）上午空','2026-10-03'),/下周一应为2026-10-05/);
+ assert.throws(()=>assertRelativeDateClaims('下周一上午有没有空','下周一是10月12号，没有日程','2026-10-03'),/下周一应为2026-10-05/);
+ assert.doesNotThrow(()=>assertRelativeDateClaims('下周六或下周一上午有没有空','下周六（10月10日）和下周一（2026-10-05）上午都空','2026-10-03'));
+ const quote='明天十点见小林，后天十一点发材料';
+ const meeting={...block('meet'),data:{...block('meet').data,name:'见小林'}};
+ const material={...block('material'),data:{...block('material').data,name:'发材料',start:'2026-09-17T11:00',end:'2026-09-17T12:00'}};
+ assert.throws(()=>parseConversation(tool([response('change',quote,'',[meeting,material])]),emptyData(),'two-dates-wrong',quote,[],[]),/2026-09-18/);
+ const corrected={...material,data:{...material.data,start:'2026-09-18T11:00',end:'2026-09-18T12:00'}};
+ assert.equal(parseConversation(tool([response('change',quote,'',[meeting,corrected])]),emptyData(),'two-dates-right',quote,[],[]).draft.operations.length,2);
+ const moved={...meeting,data:{...meeting.data,start:'2026-09-18T10:00',end:'2026-09-18T11:00'}};
+ assert.equal(parseConversation(tool([response('change','把明天的会改到后天','',[moved])]),emptyData(),'move-date','把明天的会改到后天',[],[]).draft.operations.length,1);
+ const saved=applyOperations(emptyData(),[meeting],'seed'),cancelAndRebook='明天的会先取消，后天再约',rebooked={...moved,data:{...moved.data,id:'meet-new'}};
+ assert.equal(parseConversation(tool([response('change',cancelAndRebook,'',[{type:'block.delete',id:'meet'},rebooked])]),saved,'cancel-rebook',cancelAndRebook,[],[]).draft.operations.length,2);
+});
 
 test('同轮回答文件位置并提出安排，保留两种意图而不以摘要替换回答',t=>{
  t.mock.timers.enable({apis:['Date'],now:new Date('2026-09-16T04:00:00Z')});
@@ -47,6 +67,25 @@ test('总结不能夹带写操作；已保存相同安排不再出方案',()=>{
  assert.throws(()=>parseConversation(tool([response('status','总结','总结',[block()])]),emptyData(),'summary-turn','总结',[],[]),/不能包含修改/);
  assert.throws(()=>parseConversation(tool([response('change','只帮我总结，别改安排','总结',[block()])]),emptyData(),'summary-misclassified','只帮我总结，别改安排',[],[]),/不能提出写入/);
  const d=applyOperations(emptyData(),[block()],'seed');const r=parseConversation(tool([response('change','十点','十点已有安排',[block()])]),d,'same-turn','十点',[],[]);assert.equal(r.draft,null);
+});
+test('先别动、先聊聊不能被模型误判成执行指令',()=>{
+ for(const text of ['先别动，我们再聊聊','别急着存，我再想想','先讨论一下，今天不要改','给我看个方案，别应用']){
+  assert.throws(()=>parseConversation(tool([response('change',text,'已安排',[block()])],{execution:{mode:'execute',quote:text}}),emptyData(),'defer-turn',text,[],[]),/尚未要求执行/,text);
+ }
+ const preview='先帮我看个方案，别应用';
+ const result=parseConversation(tool([response('change',preview,'',[block()])],{execution:{mode:'preview',quote:preview}}),emptyData(),'preview-turn',preview,[],[]);
+ assert.equal(result.execution.mode,'preview');assert.equal(result.draft.operations.length,1);
+});
+test('先查询再明确要求安排，后一个意图仍可立即执行',t=>{
+ t.mock.timers.enable({apis:['Date'],now:new Date('2026-09-16T04:00:00Z')});
+ const read='先看下明天的时间空不空',write='再帮我安排明天14-15点会议';
+ const meeting={...block('later','14:00'),data:{...block('later','14:00').data,name:'会议',end:'2026-09-17T15:00'}};
+ const result=parseConversation(tool([response('read',read,'下午有空。'),response('change',write,'',[meeting])],{execution:{mode:'execute',quote:write}}),emptyData(),'read-then-write',read+'，'+write,[],[]);
+ assert.equal(result.execution.mode,'execute');assert.equal(result.draft.operations[0].data.name,'会议');
+});
+test('确认与撤回同轮混写必须重新梳理，避免提示和实际方案状态矛盾',()=>{
+ const text='好的，不过第二项先不要了';
+ assert.throws(()=>parseConversation(tool([response('withdraw',text,'先不要')],{execution:{mode:'confirm',quote:'好的'},planUpdates:[{id:'old-plan',action:'dismiss',quote:'第二项先不要了'}]}),emptyData(),'confirm-withdraw',text,[],[]),/不能同时撤回或替换/);
 });
 test('撤回已保存日程使用删除操作，不因withdraw分类误拒绝',()=>{
  const data=applyOperations(emptyData(),[block()],'seed');const r=parseConversation(tool([response('withdraw','取消会面','',[{type:'block.delete',id:'b'}])]),data,'cancel-turn','取消会面',[],[]);

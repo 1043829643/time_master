@@ -6,7 +6,7 @@ import {captureBaseline,mergeChanges} from '../lib/changes.ts';
 import {commitChat,readChatReceipt,commitWorkspace,allPendingPlans,dismissProposal} from '../lib/chat-state.ts';
 import {receiveChatRequest,claimChatRequest,failChatRequest,cancelChatRequest,recentRequests} from '../lib/chat-requests.ts';
 import {readOperation,inverseOperations,verifyOperation,operationEffects} from '../lib/workspace-storage.ts';
-import {resolveExecution} from '../lib/agent-execution.ts';
+import {hasConfirmationReservation,resolveExecution} from '../lib/agent-execution.ts';
 import {memoryInputSchema,prepareMemories,readMemories,stageMemories,constraintViolations} from '../lib/conversation-memory.ts';
 import {parseConversation} from '../lib/conversation-response.ts';
 import {makeDayPlan,followupDue,reviewCounts} from '../lib/daily-planning.ts';
@@ -21,6 +21,31 @@ test('取消与租约过期均阻止迟到模型写入，接管旧token也无效
 test('失败原话保留，内容指纹和owner隔离，单owner只有一个模型执行',async()=>{const d=database(),lease=await start(d.db);await assert.rejects(()=>receiveChatRequest(d.db,'owner','request-1','改过的文字'));await receiveChatRequest(d.db,'owner','request-2','补充说明');await assert.rejects(()=>claimChatRequest(d.db,'owner','request-2'));await failChatRequest(d.db,'owner','request-1',lease,'timeout');assert.equal((await recentRequests(d.db,'owner'))[0].request_text,text);assert.ok(await claimChatRequest(d.db,'owner','request-2'));assert.deepEqual(await recentRequests(d.db,'another-owner'),[])});
 test('自然确认使用原方案的操作与三方基线，保护别的设备修改',async()=>{const d=database();d.update(applyOperations(emptyData(),[project,task],'seed'));const ops=[{type:'task.save',data:{id:'t',name:'新名称'}}],base=captureBaseline(d.snapshot().data,ops);await commitChat(d.db,'owner',d.snapshot(),'preview-1','先看看','预览',{summary:'改名',operations:ops},1,base);d.update(applyOperations(d.snapshot().data,[{type:'task.save',data:{id:'t',description:'另一设备的新说明'}}],'other'));const result=resolveExecution(d.snapshot().data,null,{mode:'confirm',quote:'就这样'},'就这样',await allPendingPlans(d.db,'owner'),[]);assert.equal(result.execution.operations[0].data.description,'另一设备的新说明');const lease=await start(d.db);await commitChat(d.db,'owner',d.snapshot(),'request-1',text,'完成',null,1,undefined,{lease,execution:result.execution});assert.equal((await readChatReceipt(d.db,'owner','preview-1')).proposal_state,'applied')});
 test('纯预览不执行；指代多份方案不猜；新出现冲突不自动应用',()=>{const data=applyOperations(emptyData(),[project,task],'seed'),ops=[{type:'block.save',data:{id:'b',name:'讨论',start:date+'T10:00',end:date+'T11:00'}}],draft={summary:'讨论',operations:ops};assert.equal(resolveExecution(data,draft,{mode:'preview',quote:'先看看'},'先看看',[],[]).execution,undefined);assert.throws(()=>resolveExecution(data,null,{mode:'confirm',quote:'可以'},'可以',[{id:'a'},{id:'b'}],[]));const busy=applyOperations(data,[{...ops[0],data:{...ops[0].data,id:'fixed',fixed:true}}],'busy');assert.equal(resolveExecution(busy,draft,{mode:'execute',quote:'安排'},'安排',[],[]).execution,undefined)});
+test('含糊肯定后接暂缓或部分撤回，不能错误应用整份旧方案',()=>{
+ const data=emptyData(),ops=[project,task],pending=[{id:'preview-apply',summary:'新项目和方案',operations:ops,baseline:captureBaseline(data,ops),workRevision:0}];
+ for(const input of ['好的，先别应用，明天再说','可以可以，不过第二个先不要了','就这样，除了明天的会议','确认，但把讨论改到周五','好的，那个先放一下，我再想想','好的，那个不做了','可以，先别存']){
+  assert.equal(hasConfirmationReservation(input),true,input);
+  const result=resolveExecution(data,null,{mode:'confirm',quote:input.startsWith('就这样')?'就这样':input.slice(0,2)},input,pending,[]);
+  assert.equal(result.execution,undefined,input);
+  assert.match(result.notice,/保留在待确认/,input);
+ }
+ assert.equal(hasConfirmationReservation('好的，可以，按这个做，辛苦了'),false);
+ assert.equal(hasConfirmationReservation('不用改了，就按原方案应用'),false);
+ assert.equal(hasConfirmationReservation('不用改了，但先别应用'),true);
+ assert.equal(resolveExecution(data,null,{mode:'confirm',quote:'按这个'},'好的，可以，按这个做，辛苦了',pending,[]).execution.sourceProposalId,'preview');
+ assert.equal(resolveExecution(data,null,{mode:'confirm',quote:'应用'},'不用改了，就按原方案应用',pending,[]).execution.sourceProposalId,'preview');
+});
+test('多份待确认方案不能靠模型自行填编号；明确点名或排序才可应用',()=>{
+ const data=emptyData(),firstOps=[{...project,data:{...project.data,id:'p-a',name:'小林沟通'}}],secondOps=[{...project,data:{...project.data,id:'p-b',name:'视觉设计'}}];
+ const pending=[{id:'first-apply',summary:'小林沟通',operations:firstOps,baseline:captureBaseline(data,firstOps),workRevision:0},{id:'second-apply',summary:'视觉设计',operations:secondOps,baseline:captureBaseline(data,secondOps),workRevision:0}];
+ const choose=(proposalId,text,quote='好的')=>resolveExecution(data,null,{mode:'confirm',quote,proposalId},text,pending,[]);
+ assert.equal(choose('first','好的').execution,undefined);
+ assert.match(choose('first','好的').notice,/多份待确认/);
+ assert.equal(choose('first','好的，应用视觉设计那份').execution,undefined);
+ assert.equal(choose('second','好的，确认第二项').execution,undefined);
+ assert.equal(choose('first','好的，确认小林沟通那份').execution.sourceProposalId,'first');
+ assert.equal(choose('second','好的，确认第二份方案').execution.sourceProposalId,'second');
+});
 test('撤销新增字段恢复缺省，保留远端其他字段，同字段改变拒绝覆盖',async()=>{const d=database();d.update(applyOperations(emptyData(),[project,task],'seed'));const before=d.snapshot(),next=applyOperations(before.data,[{type:'task.save',data:{id:'t',remainingHours:3,priority:'high'}}],'edit');await commitWorkspace(d.db,'owner',before,next,'edit');const receipt=await readOperation(d.db,'owner','edit');let remote=applyOperations(d.snapshot().data,[{type:'task.save',data:{id:'t',description:'后来补充'}}],'remote');const restored=applyOperations(remote,mergeChanges(remote,inverseOperations(receipt),receipt.undoBaseline),'undo');assert.equal(restored.tasks[0].remainingHours,undefined);assert.equal(restored.tasks[0].priority,undefined);assert.equal(restored.tasks[0].description,'后来补充');remote=applyOperations(remote,[{type:'task.save',data:{id:'t',remainingHours:4}}],'other');assert.throws(()=>mergeChanges(remote,inverseOperations(receipt),receipt.undoBaseline))});
 test('撤销新建项目时，后来关联的新事项受到保护',async()=>{const d=database(),lease=await start(d.db);await commit(d,lease);const receipt=await readOperation(d.db,'owner','request-1-execute'),remote=applyOperations(d.snapshot().data,[{...task,data:{...task.data,id:'later'}}],'later');assert.throws(()=>mergeChanges(remote,inverseOperations(receipt),receipt.undoBaseline));const restored=applyOperations(d.snapshot().data,mergeChanges(d.snapshot().data,inverseOperations(receipt),receipt.undoBaseline),'undo');assert.equal(restored.projects.length,0);assert.equal(restored.tasks.length,0)});
 test('预览限制不覆盖当前约束；应用才激活，放弃则遗忘',async()=>{const d=database(),input=memoryInputSchema.parse({kind:'constraint',statement:'旧',quote:'以后九点半开始',certainty:'confirmed',rule:'not_before',time:'09:30'}),[old]=prepareMemories([input],[],input.quote,'memory-base',emptyData());await commitChat(d.db,'owner',d.snapshot(),'memory-base',input.quote,'记住了',null,0,undefined,{memories:[old]});const newer={...old,id:old.id,quote:'改成十点',time:'10:00',sourceRequestId:'preview-1'},ops=[project];await commitChat(d.db,'owner',d.snapshot(),'preview-1','改成十点','预览',{summary:'新项目',operations:ops},0,captureBaseline(d.snapshot().data,ops),{memories:stageMemories([newer],'preview-1')});assert.equal((await readMemories(d.db,'owner',localDay()))[0].time,'09:30');await dismissProposal(d.db,'owner',d.snapshot(),'preview-1');assert.equal((await readMemories(d.db,'owner',localDay()))[0].time,'09:30');assert.equal(d.sql.prepare("SELECT COUNT(*) n FROM conversation_memories WHERE state='staged'").get().n,0)});
