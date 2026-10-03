@@ -29,6 +29,15 @@ export function restorePlan(current:Data,source:BackupData,mode:RestoreMode,requ
  // Expand a retained project's range if one of its restored children needs it.
  for(const t of next.tasks){const p=next.projects.find(p=>p.id===t.projectId);if(p){if(t.start<p.start)p.start=t.start;if(t.end>p.end)p.end=t.end;}}
  const relationWarnings:string[]=[];for(const f of next.followups){if(current.followups.some(v=>v.id===f.id)||!f.taskId||!f.projectId)continue;const task=next.tasks.find(t=>t.id===f.taskId);if(task&&task.projectId!==f.projectId){f.projectId=task.projectId;relationWarnings.push('跟进「'+f.name+'」已随当前事项关联到它现在所属的项目。');}}
+ // A retained task or followup may have moved since the backup. Newly restored
+ // captures must point at the target's current project, not its old project.
+ for(const c of next.captures){
+  if(current.captures.some(v=>v.id===c.id))continue;
+  const task=c.taskId?next.tasks.find(t=>t.id===c.taskId):undefined;
+  const followup=!task&&c.followupId?next.followups.find(f=>f.id===c.followupId):undefined;
+  const targetProject=task?.projectId??(followup?.projectId||next.tasks.find(t=>t.id===followup?.taskId)?.projectId||'');
+  if((task||followup)&&c.projectId!==targetProject){c.projectId=targetProject;relationWarnings.push('随手记「'+c.name+'」已随当前'+(task?'事项':'跟进')+'调整所属项目。');}
+ }
  const data=validateData(next),rangeWarnings=data.projects.flatMap(p=>{const old=current.projects.find(v=>v.id===p.id);return old&&(old.start!==p.start||old.end!==p.end)?['为容纳恢复的事项，项目「'+p.name+'」的日期将从 '+old.start+' → '+old.end+' 扩展为 '+p.start+' → '+p.end+'。']:[]});
  return {data,counts,warnings:[...relationWarnings,...rangeWarnings,...warningsForChange(current,data).map(w=>w.message)],total:Object.values(counts).reduce((a,b)=>a+b,0)};
 }

@@ -16,4 +16,22 @@ test('拒绝不存在或缺少编号的删除',()=>{for(const type of ['block.de
 test('重复操作编号不重复创建或记录历史',()=>{const d=apply(seed(),[{type:'task.save',data:{...task,id:'t2'}}],'same-id');assert.deepEqual(apply(d,[{type:'task.save',data:{...task,id:'t3'}}],'same-id'),d)});
 test('合法闰年与跨月，拒绝反向或无效日期',()=>{assert.equal(addDays('2028-02-28',1),'2028-02-29');assert.throws(()=>apply(seed(),[{type:'task.save',data:{id:'t',start:'2026-02-30'}}]));assert.throws(()=>apply(seed(),[{type:'task.save',data:{id:'t',start:'2026-10-01'}}]))});
 test('子事项超出项目周期会扩展项目总周期',()=>{const d=apply(seed(),[{type:'task.save',data:{id:'t',end:'2026-10-01'}}]);assert.equal(d.projects[0].end,'2026-10-01')});
+test('跟进改换项目时，已整理的原话随目标移动',()=>{
+ const base=apply(seed(),[{type:'project.save',data:{...project,id:'q'}},{type:'followup.save',data:{id:'f',name:'等回复',projectId:'p'}},{type:'capture.save',data:{id:'c',name:'联系记录',status:'converted',conversionKind:'followup',projectId:'p',followupId:'f'}}]);
+ const moved=apply(base,[{type:'followup.save',data:{id:'f',projectId:'q'}}]);
+ assert.equal(moved.followups[0].projectId,'q');assert.equal(moved.captures[0].projectId,'q');assert.equal(base.captures[0].projectId,'p');
+ const batch=apply(base,[{type:'followup.save',data:{id:'f',projectId:'q'}},{type:'capture.save',data:{id:'c',notes:'补充原话',projectId:'p'}}]);
+ assert.equal(batch.captures[0].projectId,'q');assert.equal(batch.captures[0].notes,'补充原话');
+});
+test('跟进改关联另一项目的事项时，同步跟进与原话的项目',()=>{
+ const base=apply(seed(),[{type:'project.save',data:{...project,id:'q'}},{type:'task.save',data:{...task,id:'t2',projectId:'q'}},{type:'followup.save',data:{id:'f',name:'等回复',taskId:'t',projectId:'p'}},{type:'capture.save',data:{id:'c',name:'联系记录',status:'converted',conversionKind:'followup',projectId:'p',followupId:'f'}}]);
+ const relinked=apply(base,[{type:'followup.save',data:{id:'f',taskId:'t2'}}]);
+ assert.equal(relinked.followups[0].taskId,'t2');assert.equal(relinked.followups[0].projectId,'q');assert.equal(relinked.captures[0].projectId,'q');
+ const movedTask=apply(base,[{type:'task.save',data:{id:'t',projectId:'q'}}]);
+ assert.equal(movedTask.followups[0].projectId,'q');assert.equal(movedTask.captures[0].projectId,'q');
+ const batch=apply(base,[{type:'task.save',data:{id:'t',projectId:'q'}},{type:'followup.save',data:{id:'f',notes:'补充跟进',projectId:'p'}},{type:'capture.save',data:{id:'c',notes:'补充原话',projectId:'p'}}]);
+ assert.equal(batch.followups[0].projectId,'q');assert.equal(batch.captures[0].projectId,'q');assert.equal(batch.captures[0].notes,'补充原话');
+ const newTarget=apply(base,[{type:'followup.save',data:{id:'f',taskId:'t3'}},{type:'task.save',data:{...task,id:'t3',projectId:'q'}}]);
+ assert.equal(newTarget.followups[0].projectId,'q');assert.equal(newTarget.captures[0].projectId,'q');
+});
 test('日程相邻不冲突，跨午夜重叠能识别',()=>{const d=apply(seed(),[{type:'block.save',data:{id:'b',name:'跨午夜',start:'2026-09-14T23:30',end:'2026-09-15T00:30'}}]);assert.equal(collisions(d,{id:'x',start:'2026-09-15T00:00',end:'2026-09-15T01:00'}).length,1);assert.equal(collisions(d,{id:'x',start:'2026-09-15T00:30',end:'2026-09-15T01:00'}).length,0);assert.throws(()=>apply(d,[{type:'block.save',data:{id:'bad',name:'错时',start:'2026-09-14T25:00',end:'2026-09-15T10:00'}}]))});

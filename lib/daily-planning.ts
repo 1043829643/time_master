@@ -9,6 +9,8 @@ export type DayPlanInput=z.infer<typeof dayPlanSchema>;
 const minute=(s:string)=>Number(s.slice(0,2))*60+Number(s.slice(3,5));
 const hhmm=(m:number)=>String(Math.floor(m/60)).padStart(2,'0')+':'+String(m%60).padStart(2,'0');
 const cutoff=(t:Data['tasks'][number])=>t.deadlineAt||(t.deadline?addDays(t.deadline,1)+'T00:00':'9999-12-31T23:59');
+const hardDay=(t:Data['tasks'][number])=>t.deadline||t.deadlineAt?.slice(0,10)||'';
+const hardLabel=(t:Data['tasks'][number])=>t.deadlineAt?.replace('T',' ')||t.deadline;
 const stamp=(s:string)=>Date.parse(s+'+08:00');
 export function beijingNow(now=new Date()){return new Date(now.getTime()+8*3600000).toISOString().slice(0,16);}
 export function makeDayPlan(data:Data,input:DayPlanInput,memories:ConversationMemory[],requestId:string,now=beijingNow()){
@@ -17,8 +19,8 @@ export function makeDayPlan(data:Data,input:DayPlanInput,memories:ConversationMe
  if(p.date===now.slice(0,10))cursor=Math.max(cursor,Math.ceil(minute(now.slice(11))/15)*15);
  const windowStart=cursor;
  const busy=data.blocks.filter(b=>b.start<p.date+'T'+p.end&&b.end>p.date+'T'+p.start);
- const rank=(t:Data['tasks'][number])=>(t.deadline&&t.deadline<=p.date?1000:0)+(t.priority==='high'?300:t.priority==='low'?0:100)+(t.status==='doing'?30:0)+(t.deadline?20:0);
- const tasks=data.tasks.filter(t=>t.start<=p.date&&!taskBlockers(data,t).length&&t.status!=='done'&&(p.energy==='focus'||t.energy==='light')).sort((a,b)=>rank(b)-rank(a)||(a.deadline||a.end).localeCompare(b.deadline||b.end)||a.name.localeCompare(b.name));
+ const rank=(t:Data['tasks'][number])=>(hardDay(t)&&hardDay(t)<=p.date?1000:0)+(t.priority==='high'?300:t.priority==='low'?0:100)+(t.status==='doing'?30:0)+(hardDay(t)?20:0);
+ const tasks=data.tasks.filter(t=>t.start<=p.date&&!taskBlockers(data,t).length&&t.status!=='done'&&(p.energy==='focus'||t.energy==='light')).sort((a,b)=>rank(b)-rank(a)||(hardDay(a)||a.end).localeCompare(hardDay(b)||b.end)||cutoff(a).localeCompare(cutoff(b))||a.name.localeCompare(b.name));
  const operations:Operation[]=[],items:{taskId:string;name:string;start:string;end:string;minutes:number;reason:string}[]=[];
  const reserved=new Map<string,number>();for(const b of data.blocks)if(!b.done&&b.taskId&&b.end>now&&b.end<=cutoff(data.tasks.find(t=>t.id===b.taskId)!))reserved.set(b.taskId,(reserved.get(b.taskId)||0)+(stamp(b.end)-Math.max(stamp(b.start),stamp(now)))/60000);
  let budget=p.minutes;
@@ -34,7 +36,7 @@ export function makeDayPlan(data:Data,input:DayPlanInput,memories:ConversationMe
    let op:Operation|undefined;
    while(duration>=15){const candidate:Operation={type:'block.save',data:{id:requestId+'-slot-'+items.length,taskId:t.id,name:t.name,start,end:p.date+'T'+hhmm(cursor+duration),fixed:false,done:false}};if(!constraintViolations(data,[...operations,candidate],memories).length){op=candidate;break}duration-=15;}
    if(!op){cursor+=15;continue;}
-   operations.push(op);busy.push(op.data as Block);items.push({taskId:t.id,name:t.name,start,end:p.date+'T'+hhmm(cursor+duration),minutes:duration,reason:[t.deadline?'硬截止 '+t.deadline:'预计 '+t.end+' 前推进',t.priority==='high'?'重要事项':t.status==='doing'?'接着推进':'可以开始',t.energy==='light'?'轻量处理':'需要专注'].join(' · ')});remaining-=duration;budget-=duration;cursor+=duration;
+   operations.push(op);busy.push(op.data as Block);items.push({taskId:t.id,name:t.name,start,end:p.date+'T'+hhmm(cursor+duration),minutes:duration,reason:[hardDay(t)?'硬截止 '+hardLabel(t):'预计 '+t.end+' 前推进',t.priority==='high'?'重要事项':t.status==='doing'?'接着推进':'可以开始',t.energy==='light'?'轻量处理':'需要专注'].join(' · ')});remaining-=duration;budget-=duration;cursor+=duration;
   }
  }
  const planned=p.minutes-budget;
@@ -60,5 +62,14 @@ export function convertCaptureWithNewProject(capture:Capture,input:{taskName:str
  return [{type:'project.save',data:{id:projectId,name:input.projectName,goal:capture.notes,start:input.start,end:input.end,status:'active'}},...captureTaskOperations(capture,{projectId,start:input.start,end:input.end,hours:input.hours,name:input.taskName},taskId)];
 }
 export function completeFollowup(f:Followup):Operation[]{return [{type:'followup.save',data:{...f,status:'resolved',resolvedAt:new Date().toISOString()}}];}
+export function rescheduleFollowup(f:Followup,input:{dueAt:string;notes:string;contacted:boolean;blocksTask:boolean},at:string,committedNote?:string):Operation[]{
+ const note=input.notes.trim(),append=committedNote!==undefined&&note===committedNote?'':note;
+ return [{type:'followup.save',data:{...f,status:'waiting',resolvedAt:'',dueAt:input.dueAt,blocksTask:!!f.taskId&&input.blocksTask,lastContactAt:input.contacted?at:f.lastContactAt,notes:append?(f.notes?f.notes+'\n':'')+at+' · '+append:f.notes}}];
+}
+export function submittedFollowupNote(before:Followup,op:Operation,at:string){
+ const saved=(op.data as {notes?:string})?.notes||'',prefix=(before.notes?before.notes+'\n':'')+at+' · ',legacy=before.notes+'\n'+at+' · ';
+ return saved.startsWith(prefix)?saved.slice(prefix.length):saved.startsWith(legacy)?saved.slice(legacy.length):'';
+}
+export function compareFollowupsByDue(a:Followup,b:Followup){return (a.dueAt||'9999').localeCompare(b.dueAt||'9999')||a.name.localeCompare(b.name)}
 export function followupDue(f:Followup,now=beijingNow()){return f.status==='waiting'&&!!f.dueAt&&f.dueAt<=now;}
 export function reviewCounts(data:Data,date=localDay()){return {done:data.blocks.filter(b=>b.done&&b.start.slice(0,10)===date).length,unfinished:data.blocks.filter(b=>!b.done&&b.end<date+'T23:59'&&b.start.slice(0,10)===date).length,inbox:data.captures.filter(c=>c.status==='inbox'&&(!c.reviewOn||c.reviewOn<=date)).length,followups:data.followups.filter(f=>f.status==='waiting'&&!!f.dueAt&&f.dueAt.slice(0,10)<=date).length};}

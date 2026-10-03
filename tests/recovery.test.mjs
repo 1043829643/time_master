@@ -54,6 +54,12 @@ test('补缺失不覆盖既有内容；需要扩展项目日期时明确预览',
  const backup=parseBackup({data:seed()}),current=seed();current.tasks=[];current.blocks=[];current.projects[0].name='新名称';current.projects[0].start='2026-09-15';current.projects[0].end='2026-09-18';
  const result=restorePlan(current,backup,'missing',crypto.randomUUID());assert.equal(result.counts.projects,0);assert.equal(result.counts.tasks,1);assert.equal(result.data.projects[0].name,'新名称');assert.ok(result.warnings.some(w=>/新名称.*2026-09-15.*2026-09-10/.test(w)));assert.equal(restorePlan(result.data,backup,'missing',crypto.randomUUID()).total,0);
 });
+test('补回旧随手记时，跟随已迁移的事项和跟进项目，预览明确提示',()=>{
+ const source=applyOperations(seed(),[project('q'),{type:'capture.save',data:{id:'ct',name:'原任务记录',status:'converted',conversionKind:'task',projectId:'p',taskId:'t'}},{type:'followup.save',data:{id:'f',name:'等客户回复',projectId:'p'}},{type:'capture.save',data:{id:'cf',name:'原跟进记录',status:'converted',conversionKind:'followup',projectId:'p',followupId:'f'}}],'capture-source');
+ const current=applyOperations(source,[{type:'task.save',data:{...source.tasks[0],projectId:'q'}},{type:'followup.save',data:{...source.followups[0],projectId:'q'}},{type:'capture.delete',id:'ct'},{type:'capture.delete',id:'cf'}],'target-moved');
+ const before=structuredClone(current),restored=restorePlan(current,parseBackup(exportBackup(source)),'missing','restore-moved');
+ assert.equal(restored.counts.captures,2);assert.deepEqual(restored.data.captures.map(c=>c.projectId),['q','q']);assert.equal(restored.data.tasks[0].projectId,'q');assert.equal(restored.data.followups[0].projectId,'q');assert.equal(restored.warnings.filter(w=>w.includes('随手记')).length,2);assert.deepEqual(current,before);
+});
 test('超过60条可完整预览，大量重叠保持有界，容量超限不改当前数据',()=>{
  const data=seed();data.blocks=Array.from({length:1000},(_,i)=>({...data.blocks[0],id:'b'+i}));const current=emptyData(),result=restorePlan(current,parseBackup({data}),'copies',crypto.randomUUID());assert.equal(result.total,1002);assert.equal(result.warnings.length,51);assert.match(result.warnings.at(-1),/前 50 组/);assert.deepEqual(current,emptyData());
  data.blocks=Array.from({length:2000},(_,i)=>({...data.blocks[0],id:'b'+i}));const before=structuredClone(data);assert.throws(()=>restorePlan(data,parseBackup({data}),'copies',crypto.randomUUID()));assert.deepEqual(data,before);

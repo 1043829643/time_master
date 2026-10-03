@@ -20,8 +20,9 @@ import {dayCandidates,taskBlockers} from '@/lib/planning';
 
 export default function Workspace(){
  const {snapshot,loading,loaded,busy,notice,setNotice,notify,receive,reload,save,syncState,lastSynced,dialog}=useWorkspace();
- const [view,setView]=useState<'today'|'projects'>('today'),[agentOpen,setAgentOpen]=useState(false),[editor,setEditor]=useState<EditItem|null>(null),[date,setDate]=useState(localDay()),[projectId,setProjectId]=useState(''),[find,setFind]=useState(false),[planner,setPlanner]=useState(false),[entries,setEntries]=useState<AssistantEntry[]>([]),[accepted,setAccepted]=useState<AssistantEntry|null>(null),[filter,setFilter]=useState('');
- const closeAssistant=useRef<()=>void>(()=>setAgentOpen(false)),data=snapshot.data,today=localDay();
+ const [view,setView]=useState<'today'|'projects'>('today'),[agentOpen,setAgentOpen]=useState(false),[editor,setEditor]=useState<EditItem|null>(null),[today,setToday]=useState(localDay()),[date,setDate]=useState(localDay()),[projectId,setProjectId]=useState(''),[find,setFind]=useState(false),[planner,setPlanner]=useState(false),[entries,setEntries]=useState<AssistantEntry[]>([]),[accepted,setAccepted]=useState<AssistantEntry|null>(null),[filter,setFilter]=useState('');
+ const closeAssistant=useRef<()=>void>(()=>setAgentOpen(false)),previousToday=useRef(today),data=snapshot.data;
+ useEffect(()=>{const refreshDay=()=>{const current=localDay(),previous=previousToday.current;if(current===previous)return;previousToday.current=current;setToday(current);setDate(selected=>selected===previous?current:selected)};const timer=setInterval(refreshDay,30000);document.addEventListener('visibilitychange',refreshDay);return()=>{clearInterval(timer);document.removeEventListener('visibilitychange',refreshDay)}},[]);
  const entriesRef=useRef(entries);entriesRef.current=entries;
  const closeEditor=useCallback(()=>setEditor(null),[]),acceptEntry=useCallback((e:AssistantEntry)=>{const next=entriesRef.current.filter(v=>v.id!==e.id);try{sessionStorage.setItem('time-master-handoff:'+snapshot.scope,JSON.stringify(next));entriesRef.current=next;setEntries(next);setAccepted(e)}catch{notify('文字暂存失败，原输入仍保留。',true)}},[snapshot.scope]);
  useEffect(()=>{if(snapshot.scope)try{setEntries(JSON.parse(sessionStorage.getItem('time-master-handoff:'+snapshot.scope)||'[]'))}catch{}},[snapshot.scope]);
@@ -32,7 +33,7 @@ export default function Workspace(){
  function backup(){const blob=new Blob([JSON.stringify(exportBackup(data),null,2)],{type:'application/json'}),url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download='时间管理大师-'+today+'.json';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);}
  async function demo(){if(data.projects.length)return;await save(demoOperations(),'载入示例项目，可随时编辑或删除')}
  const shared={snapshot,save,busy,open,receive,notify},ready=dayCandidates(data,date).ready;
- const attention=data.tasks.filter(t=>t.status!=='done'&&(t.deadline&&t.deadline<=addDays(today,1)||taskBlockers(data,t).length));
+ const attention=data.tasks.filter(t=>{const hardDay=t.deadline||t.deadlineAt?.slice(0,10);return t.status!=='done'&&(!!hardDay&&hardDay<=addDays(today,1)||taskBlockers(data,t).length)});
  return <>{dialog}<div className={'app-shell quiet-shell '+(agentOpen?'with-agent':'')}>
  <div className="main-shell"><header className="quiet-topbar"><a href="#" className="quiet-brand" onClick={e=>{e.preventDefault();setView('today')}}><Leaf size={22}/><span>时间管理大师</span></a>
   <nav className="primary-nav" aria-label="主要入口"><button aria-current={view==='today'?'page':undefined} className={view==='today'?'active':''} onClick={()=>setView('today')}>今天</button><button aria-current={view==='projects'?'page':undefined} className={view==='projects'?'active':''} onClick={()=>setView('projects')}>项目全景</button></nav>
@@ -43,9 +44,9 @@ export default function Workspace(){
  {!loaded?<div className="loading-state"><Leaf size={30}/><h3>{loading?'正在打开工作空间…':'暂时没有连上'}</h3>{!loading&&<div className="row"><button className="secondary" onClick={reload}>重试</button><a className="text-button" href="/signin-with-chatgpt?return_to=%2F" target="_top">重新登录</a></div>}</div>:view==='today'?<>
   <QuickCapture snapshot={snapshot} save={save} busy={busy} ask={ask} accepted={accepted}/>
   <div className="today-layout"><section className="today-schedule"><div className="compact-section-heading"><h1>时间，留给手上的事。</h1><button className="text-button" aria-expanded={planner} onClick={togglePlanner}><Clock size={16}/>{planner?'收起安排':date<=today&&beijingNow().slice(11)>='17:45'?'安排明天':'帮我挑个安排'}<ChevronDown size={14}/></button></div>
-   {planner&&<DayPlanner key={date} {...shared} date={date<today?today:date} onDateChange={setDate}/>}
-   {attention.length>0&&<details className="attention-tasks"><summary>{attention.filter(t=>t.deadline&&t.deadline<=addDays(today,1)).length>0?'临近截止，别遗漏':'有些事情还在等条件'} · {attention.length} 件</summary>{attention.map(t=><button key={t.id} onClick={()=>open({kind:'task',id:t.id})}><strong>{t.name}</strong><small>{[t.deadline?'截止 '+t.deadline:'',...taskBlockers(data,t)].filter(Boolean).join(' · ')}</small></button>)}</details>}
-   <CalendarView data={data} date={date} setDate={setDate} busy={busy} open={open} save={save} compact/>
+   {planner&&<DayPlanner {...shared} date={date<today?today:date} onDateChange={setDate}/>}
+   {attention.length>0&&<details className="attention-tasks"><summary>{attention.filter(t=>{const hardDay=t.deadline||t.deadlineAt?.slice(0,10);return !!hardDay&&hardDay<=addDays(today,1)}).length>0?'临近截止，别遗漏':'有些事情还在等条件'} · {attention.length} 件</summary>{attention.map(t=><button key={t.id} onClick={()=>open({kind:'task',id:t.id})}><strong>{t.name}</strong><small>{[t.deadlineAt?'截止 '+t.deadlineAt.replace('T',' '):t.deadline?'截止 '+t.deadline:'',...taskBlockers(data,t)].filter(Boolean).join(' · ')}</small></button>)}</details>}
+   <CalendarView data={data} date={date} setDate={next=>{setDate(next);if(planner&&next<today)setPlanner(false)}} busy={busy} open={open} save={save} compact/>
    {ready.length>0&&<details className="available-tasks"><summary>有空时，可以推进 <span>{ready.length} 件</span></summary>{ready.map(t=><div key={t.id} className="available-row"><button onClick={()=>open({kind:'task',id:t.id})}><strong>{t.name}</strong><small>{data.projects.find(p=>p.id===t.projectId)?.name}</small></button><button className="text-button" onClick={()=>open({kind:'block',taskId:t.id,date})}>排时间</button></div>)}</details>}
   </section><aside className="today-loose-ends"><DailyWork {...shared} mode="queue"/></aside></div>
  </>:<>

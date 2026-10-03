@@ -2,6 +2,8 @@
 import {useEffect,useRef,useState} from 'react';
 import {recordingStore,RecordingOccupiedError,RecordingConsumedError,type SavedRecording} from '@/lib/recording-store';
 import {recordingToWav} from '@/lib/audio';
+import {runAfterRecordingLock} from '@/lib/recording-lock';
+import {recordingRecovery} from '@/lib/recording-recovery';
 import {requestJson,errorMessage} from '@/lib/api-client';
 export function useSpeechInput(scope:string|undefined,onTranscript:(text:string,id:string)=>void|Promise<void>,beforeRecord:()=>void){
  const [phase,setPhase]=useState<'idle'|'permission'|'recording'|'recognizing'>('idle'),[seconds,setSeconds]=useState(0),[pending,setPending]=useState<SavedRecording|null>(null),[error,setError]=useState(''),[hydrated,setHydrated]=useState(false);
@@ -11,14 +13,28 @@ export function useSpeechInput(scope:string|undefined,onTranscript:(text:string,
  useEffect(()=>{if(!scope)return;alive.current=true;let active=true;setHydrated(false);persistedId.current=null;recordingStore(scope,'read').then(value=>{if(active){persistedId.current=value?.id||null;retain(value);setDurable(true);setHydrated(true)}}).catch(()=>{if(active){setHydrated(true);setDurable(false);setError('此浏览器无法暂存录音，刷新前请完成识别。')}});return()=>{active=false;alive.current=false;generation.current++;flight.current?.abort();if(timer.current)clearInterval(timer.current);if(recorder.current?.state==='recording')recorder.current.stop();stream.current?.getTracks().forEach(t=>t.stop());}},[scope]);
  async function clear(value:SavedRecording){if(!scope)return;if(persistedId.current===value.id){await recordingStore(scope,'delete',value);persistedId.current=null;}}
  async function discard(){if(!scope||!saved.current)return;const token=generation.current;try{await clear(saved.current);if(alive.current&&token===generation.current){retain(null);setError('')}}catch{setError('未能清除暂存录音，请重试。')}}
- async function recognize(value:SavedRecording){
-  if(navigator.locks){await navigator.locks.request('time-master-recording-'+scope,{ifAvailable:true},async lock=>{if(!lock){setError('另一个页面正在识别这段录音，请稍后重试。');return;}await recognizeLocked(value);});}
-  else await recognizeLocked(value);
+ async function recoverTranscript(){
+  const value=saved.current;if(!value?.delivered||!value.transcript)return;
+  const token=generation.current;
+  try{await transcript.current(value.transcript,value.id);if(token!==generation.current||!alive.current)return;await clear(value);if(token===generation.current&&alive.current){retain(null);setError('识别文字已放入输入框，请核对后发送。')}}
+  catch(e){if(token===generation.current&&alive.current)setError('识别文字仍保留：'+errorMessage(e))}
  }
- async function recognizeLocked(value:SavedRecording){
-  if(!scope)return;const token=++generation.current,controller=new AbortController();flight.current=controller;setPhase('recognizing');setError('');retain(value);
+ async function recognize(value:SavedRecording){
+  if(!scope)return;
+  if(recordingRecovery(value)==='review'){retain(value);setError('请先核对已识别的文字，再决定取回或清理。');return;}
+  const token=++generation.current;
   try{
-   if(value.delivered){await clear(value);if(token===generation.current&&alive.current){retain(null);setError('');}return;}
+   await runAfterRecordingLock(
+    ()=>{retain(value);setDurable(persistedId.current===value.id);setError('');setPhase('recognizing')},
+    async run=>{if(navigator.locks)await navigator.locks.request('time-master-recording-'+scope,async()=>{await run()});else await run()},
+    ()=>token===generation.current&&alive.current,
+    ()=>recognizeLocked(value,token),
+   );
+  }catch(e){if(token===generation.current&&alive.current){setError(errorMessage(e)+' 录音仍保留，可以重试或下载。');setPhase('idle');}}
+ }
+ async function recognizeLocked(value:SavedRecording,token:number){
+  if(!scope||token!==generation.current||!alive.current)return;const controller=new AbortController();flight.current=controller;setPhase('recognizing');setError('');
+  try{
    let storageAvailable=true;try{await recordingStore(scope,'save',value);persistedId.current=value.id;setDurable(true)}catch(e){storageAvailable=false;setDurable(false);if(e instanceof RecordingOccupiedError||e instanceof RecordingConsumedError)throw e;}
    let text=value.transcript;
    if(!text){const wav=await recordingToWav(value.blob);if(token!==generation.current)return;const audio=await new Promise<string>((resolve,reject)=>{const reader=new FileReader();reader.onload=()=>resolve(String(reader.result));reader.onerror=()=>reject(reader.error);reader.readAsDataURL(wav)});text=(await requestJson<{text:string}>('/api/qwen/asr',{audio},{signal:controller.signal})).text;}
@@ -44,5 +60,5 @@ export function useSpeechInput(scope:string|undefined,onTranscript:(text:string,
   }catch(e){if(token===generation.current){cancel();setError(e instanceof DOMException&&e.name==='NotAllowedError'?'麦克风权限未开启。可在地址栏授权，或直接输入。':'无法启用麦克风，请检查设备后重试。');}}
  }
  function download(){if(!saved.current)return;const url=URL.createObjectURL(saved.current.blob),link=document.createElement('a');link.href=url;link.download='暂存录音-'+saved.current.createdAt.slice(0,10)+(saved.current.blob.type.includes('wav')?'.wav':saved.current.blob.type.includes('mp4')?'.mp4':'.webm');link.click();setTimeout(()=>URL.revokeObjectURL(url),1000);}
- return {phase,seconds,pending,error,hydrated,durable,record,finish,cancel,discard,download,retry:()=>{if(saved.current&&phase==='idle')void recognize(saved.current);}};
+ return {phase,seconds,pending,error,hydrated,durable,record,finish,cancel,discard,recoverTranscript,download,retry:()=>{if(saved.current&&recordingRecovery(saved.current)==='retry'&&phase==='idle')void recognize(saved.current);}};
 }

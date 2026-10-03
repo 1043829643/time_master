@@ -5,7 +5,7 @@ import {localDay,addDays,emptyData,type Snapshot,type Capture,type Followup,type
 import {captureBaseline,type ChangeBaseline} from '@/lib/changes';
 import {rebaseSubmittedOperations} from '@/lib/editor-draft';
 import {type OperationReceipt} from '@/lib/workspace-storage';
-import {beijingNow,convertCapture,convertCaptureToProject,convertCaptureWithNewProject,completeFollowup,reviewCounts,type DayPlanInput} from '@/lib/daily-planning';
+import {beijingNow,convertCapture,convertCaptureToProject,convertCaptureWithNewProject,completeFollowup,rescheduleFollowup,submittedFollowupNote,compareFollowupsByDue,reviewCounts,type DayPlanInput} from '@/lib/daily-planning';
 import {followupCalendar} from '@/lib/calendar-export';
 import {requestJson,errorMessage} from '@/lib/api-client';
 import {type SaveWorkspace} from './use-workspace';
@@ -23,7 +23,7 @@ export default function DailyWork(props:Props&{mode:Mode;projectId?:string}){
  const captures=data.captures.filter(c=>view==='archive'?c.status!=='inbox':c.status==='inbox'&&(!c.reviewOn||c.reviewOn<=today));
  captures.sort((a,b)=>b.createdAt.localeCompare(a.createdAt));
  const deferred=data.captures.filter(c=>c.status==='inbox'&&c.reviewOn>today);
- const waiting=data.followups.filter(f=>(!props.projectId||f.projectId===props.projectId||data.tasks.some(t=>t.id===f.taskId&&t.projectId===props.projectId))).filter(f=>view==='archive'?f.status!=='waiting':f.status==='waiting').sort((a,b)=>a.dueAt.localeCompare(b.dueAt));
+ const waiting=data.followups.filter(f=>(!props.projectId||f.projectId===props.projectId||data.tasks.some(t=>t.id===f.taskId&&t.projectId===props.projectId))).filter(f=>view==='archive'?f.status!=='waiting':f.status==='waiting').sort(compareFollowupsByDue);
  const due=waiting.filter(f=>!!f.dueAt&&f.dueAt<=now&&f.status==='waiting'),counts=reviewCounts(data);
  function calendar(items:Followup[]){const blob=new Blob([followupCalendar(data,items)],{type:'text/calendar;charset=utf-8'}),url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download='时间管理大师-跟进提醒.ics';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);props.notify('已导出日历文件，请导入系统日历并确认提醒已开启。')}
  async function changeCapture(c:Capture,status:Capture['status']){await props.save([{type:'capture.save',data:{...c,status}}],status==='inbox'?'重新整理：'+c.name:status==='converted'?'修正随手记状态：'+c.name:'归档随手记：'+c.name)}
@@ -47,7 +47,7 @@ export function QuickCapture({save,busy,snapshot,ask,accepted}:{accepted?:{id:st
  useEffect(()=>{try{const stored=JSON.parse(sessionStorage.getItem(key)||'null');if(stored){setText(stored.text||'');setAttempt(stored.attempt||null)}}catch{}setHydrated(true)},[key]);
  useEffect(()=>{if(hydrated)try{if(text)sessionStorage.setItem(key,JSON.stringify({text,attempt}));else sessionStorage.removeItem(key)}catch{}},[text,attempt,hydrated,key]);
  useEffect(()=>{if(accepted&&!attempt&&text.trim()===accepted.text.trim())setText('')},[accepted]);
- async function submit(e:React.FormEvent){e.preventDefault();if(busy||lock.current||!text.trim())return;lock.current=true;setError('');const a=attempt||{id:crypto.randomUUID(),text:text.trim(),at:new Date().toISOString()};setAttempt(a);sessionStorage.setItem(key,JSON.stringify({text:a.text,attempt:a}));const op:Operation={type:'capture.save',data:{id:a.id,name:a.text.split('\n')[0].slice(0,160),notes:a.text,status:'inbox',createdAt:a.at}};try{const ok=await save([op],'随手记：'+a.text.slice(0,60),{operationId:'capture-'+a.id,baseline:{records:[{kind:'capture',id:a.id,value:null}],deletions:{}}});if(ok){sessionStorage.removeItem(key);setText('');setAttempt(null)}else setError('保存结果尚未确认，原文已保留。点击重试，不会重复记。')}finally{lock.current=false}}
+ async function submit(e:React.FormEvent){e.preventDefault();if(busy||lock.current||!text.trim())return;lock.current=true;setError('');const a=attempt||{id:crypto.randomUUID(),text:text.trim(),at:new Date().toISOString()};try{sessionStorage.setItem(key,JSON.stringify({text:a.text,attempt:a}))}catch{setError('浏览器暂存不可用，无法安全保存。原文还在输入框，请检查浏览器存储空间或复制原文后重试。');lock.current=false;return}setAttempt(a);const op:Operation={type:'capture.save',data:{id:a.id,name:a.text.split('\n')[0].slice(0,160),notes:a.text,status:'inbox',createdAt:a.at}};try{const ok=await save([op],'随手记：'+a.text.slice(0,60),{operationId:'capture-'+a.id,baseline:{records:[{kind:'capture',id:a.id,value:null}],deletions:{}}});if(ok){try{sessionStorage.removeItem(key)}catch{}setText('');setAttempt(null)}else setError('保存结果尚未确认，原文已保留。点击重试，不会重复记。')}finally{lock.current=false}}
  return <form className="quick-capture" onSubmit={submit}><label htmlFor="quick-capture">想到什么，就说在这里</label><textarea id="quick-capture" placeholder="比如：想学剪辑，还没想好什么时候；等小林发图后看看…" value={text} maxLength={8000} readOnly={!!attempt} onChange={e=>setText(e.target.value)} onKeyDown={e=>{if((e.ctrlKey||e.metaKey)&&e.key==='Enter')e.currentTarget.form?.requestSubmit()}}/><div className="row between"><span className="muted small">先记下来，或一起理清</span><div className="row">{ask&&<button type="button" className="text-button" disabled={busy||!!attempt} onClick={()=>ask(text)}>聊一聊 / 语音</button>}<button className="primary" disabled={!hydrated||busy||!text.trim()}>{attempt?'重试保存':'先记下来'}<Plus size={15}/></button></div></div>{error&&<p role="alert">{error}</p>}</form>;
 }
 
@@ -91,8 +91,18 @@ function CaptureConversion({capture,snapshot,save,busy,close,kind,open,receive:p
    }
    attempt.current={ops,baseline:previous&&JSON.stringify(previous.ops)===JSON.stringify(ops)?previous.baseline:baseline,summary:'整理随手记：'+capture.name,id:operationId.current};
    const a=attempt.current;recovery.state.current={...recovery.state.current,attempt:a,operationId:a.id,projectChoice};recovery.persist();
-   if(await save(a.ops,a.summary,{operationId:a.id,baseline:a.baseline})){recovery.clear();close()}
-   else setError('没有确认保存成功。输入仍保留，请重试；若记录已被别处整理，请关闭后查看最新记录。');
+   let conflicted=false;
+   if(await save(a.ops,a.summary,{operationId:a.id,baseline:a.baseline,onConflict:detail=>{
+    conflicted=true;const latest=detail.snapshot.data.captures.find(c=>c.id===capture.id);
+    attempt.current=null;operationId.current=crypto.randomUUID();
+    const choice=projectChoice!=='__new__'&&projectChoice&&!detail.snapshot.data.projects.some(p=>p.id===projectChoice)?'':projectChoice;
+    if(choice!==projectChoice)setProjectChoice(choice);
+    recovery.state.current={...recovery.state.current,before:latest||capture,attempt:null,operationId:operationId.current,projectChoice:choice};
+    if(latest)initial.current.captures=[latest];
+    try{recovery.persist()}catch{}
+    setError(!latest?'原随手记已在别处删除。输入仍保留，请复制后关闭。':latest.status!=='inbox'||latest.taskId||latest.followupId?'这条随手记已在别处整理。请关闭并查看最新记录。':choice!==projectChoice?'原项目已在别处删除。请选择新项目并核对输入后再次确认。':detail.code==='INVALID_MERGE'?detail.message||'输入与最新记录不兼容，请核对后重试。':'随手记已在别处更新。已保留表单输入并载入最新原文，请核对后再次确认。');
+   }})){recovery.clear();close()}
+   else if(!conflicted)setError('没有确认保存成功。输入仍保留，请重试；若记录已被别处整理，请关闭后查看最新记录。');
   }catch(e){setError(errorMessage(e))}finally{setSaving(false)}
  }
  const needsPeriod=kind==='project'||kind==='task';
@@ -115,21 +125,58 @@ function CaptureConversion({capture,snapshot,save,busy,close,kind,open,receive:p
  </RecoveryDialog>;
 }
 function FollowupReschedule({followup:f,snapshot,save,busy,close,receive}:Props&{followup:Followup;close:()=>void}){
- const recovery=useRecoverableForm('time-master-followup:'+snapshot.scope+':'+f.id,()=>({before:f,at:beijingNow(),attempt:null as {ops:Operation[];baseline:ChangeBaseline;summary:string;id:string}|null}));
+ const recovery=useRecoverableForm('time-master-followup:'+snapshot.scope+':'+f.id,()=>({before:f,at:beijingNow(),committedNote:undefined as string|undefined,attempt:null as {ops:Operation[];baseline:ChangeBaseline;summary:string;id:string;noteText?:string}|null}));
  f=recovery.state.current.before;
- const initial=useRef({...emptyData(),followups:[recovery.state.current.before]}),at=useRef(recovery.state.current.at),[error,setError]=useState(''),[saving,setSaving]=useState(false),attempt=useRef<{ops:Operation[];baseline:ChangeBaseline;summary:string;id:string}|null>(recovery.state.current.attempt);
- async function submit(e:React.FormEvent<HTMLFormElement>){e.preventDefault();if(saving||busy)return;const form=new FormData(e.currentTarget),notes=String(form.get('notes')||'');setSaving(true);setError('');try{
- let ops:Operation[]=[{type:'followup.save',data:{...f,status:'waiting',resolvedAt:'',dueAt:String(form.get('dueAt')),blocksTask:!!f.taskId&&form.has('blocksTask'),lastContactAt:form.has('contacted')?at.current:f.lastContactAt,notes:notes?f.notes+'\n'+at.current+' · '+notes:f.notes}}];
- let baseline=captureBaseline(initial.current,ops),id=crypto.randomUUID();const previous=attempt.current;
- if(previous){if(JSON.stringify(previous.ops)===JSON.stringify(ops)){baseline=previous.baseline;id=previous.id}else{const r=await requestJson<{snapshot:Snapshot;receipt:OperationReceipt}>('/api/workspace/operations',{operationId:previous.id,ops:previous.ops,baseline:previous.baseline,summary:previous.summary});receive(r.snapshot);ops=rebaseSubmittedOperations(previous.ops,ops,r.receipt);baseline={records:baseline.records.map(b=>r.receipt.status==='applied'?r.receipt.records.find(v=>v.kind===b.kind&&v.id===b.id)||b:b),deletions:baseline.deletions};}}
- attempt.current={ops,baseline,summary:'更新跟进时间：'+f.name,id};recovery.state.current={...recovery.state.current,attempt:attempt.current};recovery.persist();if(await save(ops,attempt.current.summary,{baseline,operationId:id})){recovery.clear();close()}else setError('暂未确认保存，输入已保留。重试会核对上次结果，不会重复追加联系记录。');
- }catch(e){setError(errorMessage(e))}finally{setSaving(false)}}
- return <RecoveryDialog label="更新跟进时间" busy={busy||saving} close={close}><form ref={recovery.form} onChange={()=>{try{recovery.persist()}catch{setError('暂存失败，请保留页面或复制输入。')}}} onSubmit={submit}><h2>{f.name}</h2><fieldset disabled={busy||saving}><label>下次跟进<input type="datetime-local" name="dueAt" defaultValue={f.dueAt}/></label><label>这次的结果 / 还缺什么<textarea name="notes" placeholder="例如：名单只到一半，周一再问剩下的" maxLength={1500}/></label><label className="check-row"><input name="contacted" type="checkbox" defaultChecked={false}/>我已经联系过对方</label>{f.taskId&&<label className="check-row"><input name="blocksTask" type="checkbox" defaultChecked={f.blocksTask}/>收到结果前，关联事项暂不能推进</label>}</fieldset>{error&&<p role="alert">{error}</p>}<div className="work-actions"><button className="primary" disabled={busy||saving}>保存下次跟进</button><button type="button" className="secondary" disabled={busy||saving} onClick={close}>取消</button></div></form></RecoveryDialog>;
+ const initial=useRef({...emptyData(),followups:[recovery.state.current.before]}),at=useRef(recovery.state.current.at),[error,setError]=useState(''),[saving,setSaving]=useState(false),[unavailable,setUnavailable]=useState(false),attempt=useRef<{ops:Operation[];baseline:ChangeBaseline;summary:string;id:string;noteText?:string}|null>(recovery.state.current.attempt);
+ async function submit(e:React.FormEvent<HTMLFormElement>){
+  e.preventDefault();if(saving||busy||unavailable)return;
+  const form=new FormData(e.currentTarget),input={dueAt:String(form.get('dueAt')||''),notes:String(form.get('notes')||''),contacted:form.has('contacted'),blocksTask:form.has('blocksTask')};
+  setSaving(true);setError('');try{
+   let ops=rescheduleFollowup(f,input,at.current,recovery.state.current.committedNote),baseline=captureBaseline(initial.current,ops),id=crypto.randomUUID();
+   const previous=attempt.current;
+   if(previous){
+    if(JSON.stringify(previous.ops)===JSON.stringify(ops)){baseline=previous.baseline;id=previous.id}
+    else{
+     const r=await requestJson<{snapshot:Snapshot;receipt:OperationReceipt}>('/api/workspace/operations',{operationId:previous.id,ops:previous.ops,baseline:previous.baseline,summary:previous.summary});
+     receive(r.snapshot);
+     const latest=r.snapshot.data.followups.find(item=>item.id===f.id);
+     if(!latest){setUnavailable(true);setError('原跟进已在别处删除。输入仍保留，请复制本次结果后新建跟进。');return}
+     if(r.receipt.status==='applied'){
+      const firstNote=previous.noteText??submittedFollowupNote(f,previous.ops.find(op=>op.type==='followup.save')!,at.current);
+      recovery.state.current.committedNote=firstNote;
+      ops=rescheduleFollowup(latest,input,at.current,firstNote);
+     }else{
+      if(JSON.stringify(latest)!==JSON.stringify(f)){
+       attempt.current=null;recovery.state.current={...recovery.state.current,before:latest,attempt:null};initial.current.followups=[latest];recovery.persist();
+       setError('上次提交未生效，但跟进已在别处更新。输入仍保留，请核对最新结果后再次保存。');return;
+      }
+      ops=rescheduleFollowup(latest,input,at.current,recovery.state.current.committedNote);
+     }
+     initial.current.followups=[latest];recovery.state.current.before=latest;baseline=captureBaseline(initial.current,ops);
+    }
+   }
+   attempt.current={ops,baseline,summary:'更新跟进时间：'+f.name,id,noteText:input.notes.trim()};
+   recovery.state.current={...recovery.state.current,attempt:attempt.current};recovery.persist();
+   let conflicted=false;
+   if(await save(ops,attempt.current.summary,{baseline,operationId:id,onConflict:detail=>{
+    conflicted=true;const latest=detail.snapshot.data.followups.find(item=>item.id===f.id);
+    attempt.current=null;recovery.state.current={...recovery.state.current,before:latest||f,attempt:null};
+    if(latest)initial.current.followups=[latest];else setUnavailable(true);
+    try{recovery.persist()}catch{}
+    setError(!latest?'原跟进已在别处删除。输入仍保留，请复制本次结果后新建跟进。':detail.code==='INVALID_MERGE'?detail.message||'输入与最新记录不兼容，请核对后重试。':'跟进已在别处更新。已保留表单输入，请核对最新记录后再次保存。');
+   }})){recovery.clear();close()}
+   else if(!conflicted)setError('暂未确认保存，输入已保留。重试会核对上次结果，不会重复追加联系记录。');
+  }catch(e){setError(errorMessage(e))}finally{setSaving(false)}
+ }
+ return <RecoveryDialog label="更新跟进时间" busy={busy||saving} close={close}><form ref={recovery.form} onChange={()=>{try{recovery.persist()}catch{setError('暂存失败，请保留页面或复制输入。')}}} onSubmit={submit}><h2>{f.name}</h2><fieldset disabled={busy||saving}><label>下次跟进<input type="datetime-local" name="dueAt" defaultValue={f.dueAt}/></label><label>这次的结果 / 还缺什么<textarea name="notes" placeholder="例如：名单只到一半，周一再问剩下的" maxLength={1500}/></label><label className="check-row"><input name="contacted" type="checkbox" defaultChecked={false}/>我已经联系过对方</label>{f.taskId&&<label className="check-row"><input name="blocksTask" type="checkbox" defaultChecked={f.blocksTask}/>收到结果前，关联事项暂不能推进</label>}</fieldset>{error&&<p role="alert">{error}</p>}<div className="work-actions"><button className="primary" disabled={busy||saving||unavailable}>保存下次跟进</button><button type="button" className="secondary" disabled={busy||saving} onClick={close}>取消</button></div></form></RecoveryDialog>;
 }
+function plannerTimes(date:string){const time=beijingNow().slice(11);return date===localDay()?{start:time,end:time>='17:45'?'23:59':'18:00'}:{start:'09:00',end:'12:00'};}
 export function DayPlanner({snapshot,receive,busy,open,date,onDateChange}:Props&{date?:string;onDateChange?:(date:string)=>void}){
- const [input,setInput]=useState<DayPlanInput>(()=>{const time=beijingNow().slice(11),tomorrow=time>='17:45';return {date:date||(tomorrow?addDays(localDay(),1):localDay()),start:date?date===localDay()?time:'09:00':tomorrow?'09:00':time,end:date?date===localDay()?time>='17:45'?'23:59':'18:00':'12:00':tomorrow?'12:00':'18:00',minutes:120,energy:'focus'}}),[preview,setPreview]=useState<any>(null),[loading,setLoading]=useState(false),[error,setError]=useState(''),requestId=useRef(crypto.randomUUID()),lock=useRef(false);
- const set=(key:keyof DayPlanInput,value:string|number)=>{setInput(p=>({...p,[key]:value}));setPreview(null);setError('');requestId.current=crypto.randomUUID()};
+ const [input,setInput]=useState<DayPlanInput>(()=>{const target=date||(beijingNow().slice(11)>='17:45'?addDays(localDay(),1):localDay());return {date:target,...plannerTimes(target),minutes:120,energy:'focus'}}),[preview,setPreview]=useState<any>(null),[loading,setLoading]=useState(false),[error,setError]=useState(''),requestId=useRef(crypto.randomUUID()),lock=useRef(false),timeTouched=useRef({start:false,end:false});
+ useEffect(()=>{if(!date)return;setInput(p=>{if(p.date===date)return p;const defaults=plannerTimes(date);return {...p,date,start:timeTouched.current.start?p.start:defaults.start,end:timeTouched.current.end?p.end:defaults.end}});setPreview(null);setError('');requestId.current=crypto.randomUUID()},[date]);
+ const set=(key:keyof DayPlanInput,value:string|number)=>{if(key==='start'||key==='end')timeTouched.current[key]=true;setInput(p=>({...p,[key]:value}));setPreview(null);setError('');requestId.current=crypto.randomUUID()};
+ const changeDate=(next:string)=>{if(!next)return;const defaults=plannerTimes(next);setInput(p=>({...p,date:next,start:timeTouched.current.start?p.start:defaults.start,end:timeTouched.current.end?p.end:defaults.end}));setPreview(null);setError('');requestId.current=crypto.randomUUID();onDateChange?.(next)};
  async function plan(apply=false){if(loading||busy||lock.current)return;lock.current=true;setLoading(true);setError('');try{const r=await requestJson<any>('/api/planning',{input,requestId:requestId.current,preview:!apply,...(apply?{reviewedRevision:preview.revision,planHash:preview.planHash}:{})});if(apply){receive(r.snapshot);setPreview(null);requestId.current=crypto.randomUUID();setError('已放入日程。做完一段后，可以核对事项还需多少投入。')}else setPreview(r)}catch(e){setError(errorMessage(e))}finally{setLoading(false);lock.current=false}}
- const risks=snapshot.data.tasks.filter(t=>t.status!=='done'&&t.deadline&&t.deadline<=addDays(input.date,1));
- return <section className="day-planner"><div className="row between"><div><h2>{input.date===localDay()?'今天':input.date===addDays(localDay(),1)?'明天':input.date}还能投入多少？</h2><p>按新增投入来算，已有日程保留。每段最多 60 分钟，不自动延长工作时间。</p></div><Clock size={22}/></div><fieldset disabled={loading||busy} className="planner-fields"><label>日期<input type="date" value={input.date} onChange={e=>{set('date',e.target.value);if(e.target.value)onDateChange?.(e.target.value)}}/></label><label>从<input type="time" value={input.start} onChange={e=>set('start',e.target.value)}/></label><label>到<input type="time" value={input.end} onChange={e=>set('end',e.target.value)}/></label><label>新增投入<select value={input.minutes} onChange={e=>set('minutes',Number(e.target.value))}><option value={30}>30 分钟</option><option value={60}>1 小时</option><option value={120}>2 小时</option><option value={180}>3 小时</option><option value={240}>4 小时</option></select></label><label>现在的精力<select value={input.energy} onChange={e=>set('energy',e.target.value)}><option value="focus">可以专注</option><option value="light">做点轻的</option></select></label></fieldset>{risks.length>0&&<div className="deadline-watch"><strong>临近硬截止，别遗漏</strong>{risks.map(t=><button className="text-button" key={t.id} onClick={()=>open({kind:'task',id:t.id})}>{t.deadline} · {t.name}<ArrowUpRight size={13}/></button>)}</div>}<button className="secondary" disabled={loading||busy} onClick={()=>plan()}>{loading?'正在核对…':'帮我挑选并预览'}</button>{error&&<p role="status">{error}</p>}{preview&&<div className="plan-preview"><p>{preview.explanation}</p>{preview.warnings?.map((w:string,i:number)=><p className="schedule-risk" key={i}>{w}</p>)}{preview.blockedCount>0&&<small className="muted">另有 {preview.blockedCount} 件事项仍在等待条件满足，本次未安排。</small>}{preview.items.map((i:any,index:number)=><div className="plan-slot" key={index}><span>{i.start.slice(11)}—{i.end.slice(11)}</span><div><strong>{i.name}</strong><small>{i.reason}</small></div><b>{i.minutes} 分钟</b></div>)}{preview.items.length>0&&<button className="primary" disabled={loading||busy||preview.revision!==snapshot.revision} onClick={()=>plan(true)}>确认放入日程</button>}{preview.revision!==snapshot.revision&&<p>安排或偏好已更新，请重新预览。</p>}</div>}</section>;
+ const risks=snapshot.data.tasks.filter(t=>{const hardDay=t.deadline||t.deadlineAt?.slice(0,10);return t.status!=='done'&&!!hardDay&&hardDay<=addDays(input.date,1)});
+ return <section className="day-planner"><div className="row between"><div><h2>{input.date===localDay()?'今天':input.date===addDays(localDay(),1)?'明天':input.date}还能投入多少？</h2><p>按新增投入来算，已有日程保留。每段最多 60 分钟，不自动延长工作时间。</p></div><Clock size={22}/></div><fieldset disabled={loading||busy} className="planner-fields"><label>日期<input type="date" value={input.date} onChange={e=>changeDate(e.target.value)}/></label><label>从<input type="time" value={input.start} onChange={e=>set('start',e.target.value)}/></label><label>到<input type="time" value={input.end} onChange={e=>set('end',e.target.value)}/></label><label>新增投入<select value={input.minutes} onChange={e=>set('minutes',Number(e.target.value))}><option value={30}>30 分钟</option><option value={60}>1 小时</option><option value={120}>2 小时</option><option value={180}>3 小时</option><option value={240}>4 小时</option></select></label><label>现在的精力<select value={input.energy} onChange={e=>set('energy',e.target.value)}><option value="focus">可以专注</option><option value="light">做点轻的</option></select></label></fieldset>{risks.length>0&&<div className="deadline-watch"><strong>临近硬截止，别遗漏</strong>{risks.map(t=><button className="text-button" key={t.id} onClick={()=>open({kind:'task',id:t.id})}>{(t.deadlineAt||t.deadline||'').replace('T',' ')} · {t.name}<ArrowUpRight size={13}/></button>)}</div>}<button className="secondary" disabled={loading||busy} onClick={()=>plan()}>{loading?'正在核对…':'帮我挑选并预览'}</button>{error&&<p role="status">{error}</p>}{preview&&<div className="plan-preview"><p>{preview.explanation}</p>{preview.warnings?.map((w:string,i:number)=><p className="schedule-risk" key={i}>{w}</p>)}{preview.blockedCount>0&&<small className="muted">另有 {preview.blockedCount} 件事项仍在等待条件满足，本次未安排。</small>}{preview.items.map((i:any,index:number)=><div className="plan-slot" key={index}><span>{i.start.slice(11)}—{i.end.slice(11)}</span><div><strong>{i.name}</strong><small>{i.reason}</small></div><b>{i.minutes} 分钟</b></div>)}{preview.items.length>0&&<button className="primary" disabled={loading||busy||preview.revision!==snapshot.revision} onClick={()=>plan(true)}>确认放入日程</button>}{preview.revision!==snapshot.revision&&<p>安排或偏好已更新，请重新预览。</p>}</div>}</section>;
 }
