@@ -23,7 +23,8 @@ test('一次不放日历的决定不能被泛化成全局长期偏好',()=>{
 });
 test('下周一与跨年相对日期由程序换算',()=>{assert.equal(relativeDate('下周一验收','2026-09-16'),'2026-09-21');assert.equal(relativeDate('下周一','2026-12-30'),'2027-01-04');assert.equal(relativeDate('后天','2026-12-31'),'2027-01-02')});
 
-test('同轮回答文件位置并提出安排，保留两种意图而不以摘要替换回答',()=>{
+test('同轮回答文件位置并提出安排，保留两种意图而不以摘要替换回答',t=>{
+ t.mock.timers.enable({apis:['Date'],now:new Date('2026-09-16T04:00:00Z')});
  const r=parseConversation(tool([response('read','文件在哪','工程在公司笔记本 D:/Projects。'),response('change','明天十点安排','给你留一小时。',[block()])]),emptyData(),'mixed-turn','文件在哪，明天十点安排',[],[]);
  assert.match(r.reply,/公司笔记本/);assert.match(r.reply,/新增日程/);assert.equal(r.draft.operations.length,1);
 });

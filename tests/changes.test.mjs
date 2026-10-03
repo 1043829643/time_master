@@ -46,7 +46,8 @@ test('两份独立安排可顺序合并，新加入固定会议后重算冲突',
  const base=seed(),one=[block('one')],two=[block('two',{start:'2026-09-19T10:00',end:'2026-09-19T11:00'})];let current=apply(base,one);assert.equal(mergeChanges(current,two,captureBaseline(base,two)).length,1);
  current=apply(current,[block('meeting',{fixed:true,start:'2026-09-19T10:30',end:'2026-09-19T11:30'})]);assert.equal(changeWarnings(current,mergeChanges(current,two,captureBaseline(base,two))).filter(w=>w.code==='overlap').length,1);
 });
-test('改动固定安排独立警告，前置延期与完成时提示受影响日程',()=>{
+test('改动固定安排独立警告，前置延期与完成时提示受影响日程',t=>{
+ t.mock.timers.enable({apis:['Date'],now:new Date('2026-09-16T04:00:00Z')});
  let data=apply(seed(),[block('fixed',{fixed:true}),block('work',{taskId:'b',start:'2026-09-19T15:00',end:'2026-09-19T16:00'}),task('b',{dependencies:['a']})]);
  assert.ok(changeWarnings(data,[block('fixed',{start:'2026-09-18T12:00',end:'2026-09-18T13:00',fixed:true})]).some(w=>w.code==='fixed'));
  assert.ok(changeWarnings(data,[task('a',{end:'2026-09-25'})]).some(w=>w.message.includes('2026-09-25')));

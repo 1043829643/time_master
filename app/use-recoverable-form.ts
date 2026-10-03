@@ -8,5 +8,5 @@ export function useRecoverableForm<T>(key:string,create:()=>T){
  useLayoutEffect(()=>{if(form.current&&initial.entries.length)restoreEntries(form.current,initial.entries)},[]);
  function persist(){sessionStorage.setItem(key,JSON.stringify({version:1,state:state.current,entries:form.current?formEntries(form.current):initial.entries}))}
  function clear(){sessionStorage.removeItem(key)}
- return {form,state,persist,clear};
+ return {form,state,entries:initial.entries,persist,clear};
 }

@@ -40,9 +40,24 @@ export function makeDayPlan(data:Data,input:DayPlanInput,memories:ConversationMe
  const planned=p.minutes-budget;
  return {items,operations,plannedMinutes:planned,unfilledMinutes:budget,blockedCount:data.tasks.filter(t=>t.status!=='done'&&taskBlockers(data,t).length).length,explanation:items.length?`安排了 ${planned} 分钟，保留现有日程。${budget?'还有 '+budget+' 分钟没有找到符合时段、精力与限制的事项。':''}`:'暂时没有可放入这段时间的事项。检查等待条件、剩余投入、已排时间，或换一个时段。'};
 }
+function assertCaptureConvertible(capture:Capture){
+ if(capture.status!=='inbox'||capture.taskId||capture.followupId||capture.conversionKind)throw new Error('这条随手记已关联项目、事项或跟进，请先查看原记录，避免重复创建。');
+}
+function captureTaskOperations(capture:Capture,input:{projectId:string;start:string;end:string;hours:number;name:string},taskId:string):Operation[]{
+ return [{type:'task.save',data:{id:taskId,projectId:input.projectId,name:input.name,shortName:'',description:capture.notes,start:input.start,end:input.end,status:'todo',owner:'我',hours:input.hours,remainingHours:input.hours,priority:'normal',dependencies:[],contactId:'',updatedAt:'',result:''}},{type:'capture.save',data:{...capture,status:'converted',conversionKind:'task',taskId,projectId:input.projectId,followupId:'',reviewOn:''}}];
+}
 export function convertCapture(data:Data,capture:Capture,input:{projectId:string;start:string;end:string;hours:number},taskId:string):Operation[]{
- if(capture.status!=='inbox')throw new Error('这条随手记已经整理过了。');
- return [{type:'task.save',data:{id:taskId,projectId:input.projectId,name:capture.name,shortName:'',description:capture.notes,start:input.start,end:input.end,status:'todo',owner:'我',hours:input.hours,remainingHours:input.hours,priority:'normal',dependencies:[],contactId:'',updatedAt:'',result:''}},{type:'capture.save',data:{...capture,status:'converted',taskId,projectId:input.projectId,followupId:'',reviewOn:''}}];
+ assertCaptureConvertible(capture);
+ return captureTaskOperations(capture,{...input,name:capture.name},taskId);
+}
+export function convertCaptureToProject(capture:Capture,input:{name:string;goal:string;start:string;end:string},projectId:string):Operation[]{
+ assertCaptureConvertible(capture);
+ if(capture.projectId)throw new Error('这条随手记已归属项目，请在原项目中继续整理。');
+ return [{type:'project.save',data:{id:projectId,name:input.name,goal:input.goal,start:input.start,end:input.end,status:'active'}},{type:'capture.save',data:{...capture,status:'converted',conversionKind:'project',projectId,taskId:'',followupId:'',reviewOn:''}}];
+}
+export function convertCaptureWithNewProject(capture:Capture,input:{taskName:string;projectName:string;start:string;end:string;hours:number},taskId:string,projectId:string):Operation[]{
+ assertCaptureConvertible(capture);
+ return [{type:'project.save',data:{id:projectId,name:input.projectName,goal:capture.notes,start:input.start,end:input.end,status:'active'}},...captureTaskOperations(capture,{projectId,start:input.start,end:input.end,hours:input.hours,name:input.taskName},taskId)];
 }
 export function completeFollowup(f:Followup):Operation[]{return [{type:'followup.save',data:{...f,status:'resolved',resolvedAt:new Date().toISOString()}}];}
 export function followupDue(f:Followup,now=beijingNow()){return f.status==='waiting'&&!!f.dueAt&&f.dueAt<=now;}
