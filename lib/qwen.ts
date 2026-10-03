@@ -1,7 +1,8 @@
 import {env} from 'cloudflare:workers';
 import {ApiError} from './store';
 import {providerFailure} from './provider-error';
-export function qwenConfig(){const localTest=env.QWEN_ACCESS_MODE==='token-plan-local',tokenPlan=localTest||env.QWEN_ACCESS_MODE==='token-plan';return {configured:!!env.QWEN_API_KEY,tokenPlan,localTest,chat:env.QWEN_CHAT_MODEL||(tokenPlan?'qwen3.8-flash':'qwen-plus'),asr:env.QWEN_ASR_MODEL||(tokenPlan?'qwen-audio-3.0-asr-flash':'qwen3-asr-flash'),tts:env.QWEN_TTS_MODEL||(tokenPlan?'qwen-audio-3.0-tts-plus':'qwen3-tts-flash'),voice:env.QWEN_VOICE||(tokenPlan?'longanhuan_v3.6':'Cherry')};}
+import {realtimeSettings} from './qwen-realtime';
+export function qwenConfig(){const localTest=env.QWEN_ACCESS_MODE==='token-plan-local',tokenPlan=localTest||env.QWEN_ACCESS_MODE==='token-plan';const realtime=realtimeSettings(env);return {configured:!!env.QWEN_API_KEY,tokenPlan,localTest,chat:env.QWEN_CHAT_MODEL||(tokenPlan?'qwen3.8-flash':'qwen-plus'),asr:env.QWEN_ASR_MODEL||(tokenPlan?'qwen-audio-3.0-asr-flash':'qwen3-asr-flash'),tts:env.QWEN_TTS_MODEL||(tokenPlan?'qwen-audio-3.0-tts-plus':'qwen3-tts-flash'),voice:env.QWEN_VOICE||(tokenPlan?'longanhuan_v3.6':'Cherry'),realtime:{configured:realtime.configured,model:realtime.model,voice:realtime.voice,reason:realtime.reason,testMode:realtime.testMode}};}
 export async function qwen(body:unknown,kind:'chat'|'tts'|'asr'='chat',timeoutMs=60000){
  if(!env.QWEN_API_KEY)throw new ApiError('Qwen 尚未配置，请先连接模型后再使用语音和对话。',503);
  const config=qwenConfig();

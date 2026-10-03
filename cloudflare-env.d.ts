@@ -7,6 +7,10 @@ declare namespace Cloudflare {
     QWEN_TTS_MODEL?: string;
     QWEN_ACCESS_MODE?: string;
     QWEN_VOICE?: string;
+    QWEN_REALTIME_WORKSPACE_ID?: string;
+    QWEN_REALTIME_API_KEY?: string;
+    QWEN_REALTIME_MODEL?: string;
+    QWEN_REALTIME_TEST_MODE?: string;
     BUCKET?: R2Bucket;
   }
 }

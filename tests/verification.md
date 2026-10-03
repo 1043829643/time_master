@@ -1,3 +1,14 @@
+# 2026-10-04：实时语音 WebRTC 真实联测
+
+- 本机通过显式 `QWEN_REALTIME_TEST_MODE=token-plan` 打开测试配置；密钥只由服务端用于 SDP 协商，没有进入浏览器响应、日志或仓库。
+- 使用独立临时 Python `aiortc` 客户端生成合法音频 Offer，`/api/qwen/realtime/sdp` 返回 HTTP 200 和 Answer SDP；PeerConnection 达到 `connected`。百炼创建的 `txt` DataChannel 打开，并依次返回 `session.created`、`session.updated`。客户端自己创建的 `oai-events` 通道没有打开，因此客户端必须监听服务端创建的通道。
+- 用 Qwen TTS 合成的普通测试句，通过实时音轨发送；`session.update` 确认 `modalities=["text"]` 与 `smart_turn`。`conversation.item.input_audio_transcription.completed` 返回正确完整转录“今天下午2点帮我提醒喝水。”，随后返回 `response.text.done` 与 `response.done`；未收到远端音频帧或音频输出事件。
+- 上述联测没有创建日程或修改工作空间，也不是用户本人麦克风、浏览器 UI 或线上 Site 的端到端测试。测试临时客户端和依赖位于系统临时目录，不属于项目依赖。
+- 结束生命周期回归覆盖：挂断后等最终转写、多个并发转写项、未完成片段不当作命令、连续录音停麦后排空识别队列、失败录音容量限制与按工作空间恢复。全量 `node --test tests/*.test.mjs` 为 188/188；`npx tsc --noEmit` 和生产构建通过。
+- 本机浏览器检查了语音通话入口和面板布局。该浏览器没有可用麦克风，点击后显示明确的设备错误；用户真实麦克风和线上 Site 通话仍须在有麦克风的浏览器实际体验。
+
+---
+
 # 2026-09-16：长期存储与故障恢复架构
 
 - 自动化回归 84/84 通过。新增覆盖：迁移失败回滚与重试、旧写入保护、记录事务回滚、超过 100 次后的持久幂等、关闭迟到请求、丢失响应后改稿与三方字段保留、200 轮按序追赶、放弃方案的版本变更、大方案分行、删除摘要和时间条裁剪。

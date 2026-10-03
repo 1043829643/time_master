@@ -1,4 +1,4 @@
-export type OutboxItem={scope:string;id:string;text:string;createdAt:number;state:'queued'|'sending'|'failed';error?:string};
+export type OutboxItem={scope:string;id:string;text:string;createdAt:number;state:'queued'|'sending'|'failed';error?:string;source?:'text'|'voice'};
 function open(){return new Promise<IDBDatabase>((resolve,reject)=>{const r=indexedDB.open('time-master-chat-outbox',1);r.onupgradeneeded=()=>{const s=r.result.createObjectStore('messages',{keyPath:['scope','id']});s.createIndex('scope','scope')};r.onsuccess=()=>resolve(r.result);r.onerror=()=>reject(r.error)});}
 export async function outbox(scope:string,action:'list'|'put'|'update'|'remove',value?:OutboxItem|string):Promise<OutboxItem[]>{
  if(!scope)throw new Error('工作空间尚未确认，文字仍保留。');

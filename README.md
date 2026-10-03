@@ -16,6 +16,10 @@
 
 在忽略的 .dev.vars 中配置与 .env.example 一致的变量：QWEN_API_KEY、QWEN_ACCESS_MODE、QWEN_CHAT_MODEL、QWEN_ASR_MODEL、QWEN_TTS_MODEL、QWEN_VOICE。Site 的变量独立配置；QWEN_API_KEY 使用 Sites secret，其余模型设置使用环境变量。不要把凭证写入源码或浏览器。
 
+实时语音频道使用 Qwen-Audio-3.0-Realtime-Plus 的 WebRTC 接入。网站服务端仅代理同源 SDP 协商；浏览器与百炼交换媒体和会话事件，密钥不会发给浏览器。正式配置使用标准按量付费密钥 `QWEN_REALTIME_API_KEY`（Sites secret）及其北京地域业务空间 ID `QWEN_REALTIME_WORKSPACE_ID`；若 `QWEN_ACCESS_MODE=standard`，也可复用标准 `QWEN_API_KEY`。需要 Qwen3.8 Omni 时显式设置 `QWEN_REALTIME_MODEL=qwen3.8-omni-flash-realtime`。仅在本人测试配置中显式设置 `QWEN_REALTIME_TEST_MODE=token-plan` 时，实时语音改用现有套餐密钥与固定 `token-plan` 业务空间；正式站点应维持标准配置。未配置时状态接口返回具体原因，语音频道不发起供应商连接。
+
+在时间伙伴里点击「开始语音通话」即可持续交谈。实时转写和连续识别的最终话语都会进入与文字相同的持久请求队列，再由原有 agent 核对、保存并返回可撤销的操作回执；回复通过现有 TTS 朗读，朗读时麦克风自动静音，用户可以打断或手动静音。结束通话会先停麦并等待最后一句完成；不完整的实时转写只供放入输入框核对，不会当作命令执行。连续识别失败的录音或文字按工作空间暂存在当前浏览器，可显式重试、下载或清理；重新打开页面不会自动执行旧录音。
+
 通用接口默认模型：qwen-plus（对话与安排方案）、qwen3-asr-flash（语音识别）、qwen3-tts-flash（中文朗读）。本机 Token Plan 测试使用 qwen3.8-flash、qwen-audio-3.0-asr-flash、qwen-audio-3.0-tts-plus，音色 longanhuan_v3.6。浏览器录音在本机转为 16kHz 单声道 WAV 后提交。识别文本可编辑，安排方案需要检查后应用；没有密钥时明确显示未配置。
 
 ## 数据行为
