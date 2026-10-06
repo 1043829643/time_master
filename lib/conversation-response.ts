@@ -25,7 +25,7 @@ function unresolvedDeferral(value:string){
 }
 
 // Validate the whole turn before committing any answer, memory, or plan state.
-export function parseConversation(message:any,data:Data,requestId:string,text:string,pending:ReviewablePlan[],known:ConversationMemory[],closedPlans:{request_id:string;proposal_state:string}[]=[]){
+export function parseConversation(message:any,data:Data,requestId:string,text:string,pending:ReviewablePlan[],known:ConversationMemory[],closedPlans:{request_id:string;proposal_state:string}[]=[],stagedVoiceAncestorIds:ReadonlySet<string>=new Set()){
  if(message?.tool_calls?.length!==1||message.tool_calls[0].function.name!=='respond_to_user')throw new Error('必须恰好调用一次 respond_to_user');
  const args=JSON.parse(message.tool_calls[0].function.arguments);
  // Provider adapters sometimes serialize nested arrays or put a record key
@@ -104,7 +104,7 @@ export function parseConversation(message:any,data:Data,requestId:string,text:st
   }
   transitions.push({id:update.id.replace(/-apply$/,''),state:update.action==='dismiss'?'dismissed':'superseded',reason:'根据你的新决定：'+update.quote,...(update.action==='supersede'?{replacementId:requestId}:{})});
  }
- const retained=pending.filter(p=>!transitions.some(t=>t.id===p.id.replace(/-apply$/,'')));
+ const retained=pending.filter(p=>!transitions.some(t=>t.id===p.id.replace(/-apply$/,''))&&!stagedVoiceAncestorIds.has(p.id.replace(/-apply$/,'')));
  if(ops.some(op=>retained.some(p=>p.operations.some(old=>key(old)===key(op)&&stable(old)!==stable(op)))))throw new Error('正在修改已有待确认安排，必须通过 planUpdates 替换原方案，不能让冲突版本同时有效。');
  // Repeating an unchanged pending operation must not produce a second card.
  ops=ops.filter(op=>!retained.some(p=>p.operations.some(old=>stable(old)===stable(op))));

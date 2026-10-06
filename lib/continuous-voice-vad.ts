@@ -10,8 +10,10 @@ export type VadState = {
 export type VadEvent = 'none' | 'start' | 'finish' | 'limit';
 
 export const VOICE_SAMPLE_MS = 50;
-export const VOICE_SILENCE_MS = 1700;
-export const VOICE_MAX_TURN_MS = 24000;
+// A pause while thinking or correcting a date is common in natural speech.
+// This is only an ASR clip boundary; it must not by itself submit a command.
+export const VOICE_SILENCE_MS = 2800;
+export const VOICE_MAX_TURN_MS = 42000;
 export const VOICE_MIN_SPEECH_MS = 350;
 
 export function initialVadState(noiseFloor = 0.004): VadState {
@@ -34,7 +36,9 @@ export function advanceVad(state: VadState, rms: number, now: number): {state: V
   const lastVoiceAt = isVoice ? now : state.lastVoiceAt;
   const speechMs = Math.max(0, lastVoiceAt - state.startedAt);
   if (now - state.startedAt >= VOICE_MAX_TURN_MS) {
-    return {state: initialVadState(state.noiseFloor), event: 'limit', speechMs};
+    // Keep the speaking state across the recorder rotation. Resetting here
+    // used to drop the first syllable of the next clip during long speech.
+    return {state: {...initialVadState(state.noiseFloor), speaking: true, startedAt: now, lastVoiceAt: now}, event: 'limit', speechMs};
   }
   if (now - lastVoiceAt >= VOICE_SILENCE_MS) {
     return {state: initialVadState(state.noiseFloor), event: 'finish', speechMs};

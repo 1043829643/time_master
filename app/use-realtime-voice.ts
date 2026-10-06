@@ -6,22 +6,19 @@ import {RealtimeVoiceDrain} from '@/lib/realtime-voice-drain';
 
 type VoiceStatus='idle'|'connecting'|'listening'|'muted'|'ending'|'error';
 type RealtimeConfig={configured:boolean;model:string;reason?:string};
-type ModelEvent={type?:string;item_id?:string;event_id?:string;text?:string;stash?:string;transcript?:string;error?:{message?:string;code?:string}};
+type ModelEvent={type?:string;item_id?:string;event_id?:string;text?:string;stash?:string;transcript?:string;reason?:string;error?:{message?:string;code?:string}};
 type Options={onFinalUtterance:(text:string,turnId:string)=>void|Promise<void>;onError?:(message:string)=>void};
 type Session={
  pc:RTCPeerConnection;sender:RTCRtpSender;controller:AbortController;channels:Set<RTCDataChannel>;
  stream:MediaStream|null;eventChannel:RTCDataChannel|null;buffer:RealtimeTurnBuffer;drain:RealtimeVoiceDrain;
  created:boolean;updateSent:boolean;ready:boolean;muted:boolean;responding:boolean;closed:boolean;draining:boolean;
- quietTimer:ReturnType<typeof setTimeout>|null;disconnectTimer:ReturnType<typeof setTimeout>|null;
+ disconnectTimer:ReturnType<typeof setTimeout>|null;
  readyTimer:ReturnType<typeof setTimeout>|null;drainTimer:ReturnType<typeof setTimeout>|null;
  settleTimer:ReturnType<typeof setTimeout>|null;stopMicTimer:ReturnType<typeof setTimeout>|null;
  drainPromise:Promise<void>|null;resolveDrain:(()=>void)|null;
  resolveReady:()=>void;rejectReady:(e:Error)=>void;
 };
 
-// The provider uses VAD to finish an item, but a person may immediately correct
-// it. Send a single complete turn after a short quiet period, never a delta.
-const QUIET_MS=1800;
 const READY_MS=45000;
 const DRAIN_MS=4500;
 const DRAIN_SETTLE_MS=500;
@@ -49,12 +46,12 @@ export function useRealtimeVoice({onFinalUtterance,onError}:Options){
  const [status,setStatus]=useState<VoiceStatus>('idle'),[partial,setPartial]=useState(''),[error,setError]=useState(''),[muted,setMuted]=useState(false);
  const sessionRef=useRef<Session|null>(null),mounted=useRef(true),finalRef=useRef(onFinalUtterance),errorRef=useRef(onError);
  const startSequence=useRef(0),preflight=useRef<AbortController|null>(null),startPromise=useRef<Promise<boolean>|null>(null);
+ const unsentRef=useRef('');
  useEffect(()=>{finalRef.current=onFinalUtterance;errorRef.current=onError},[onFinalUtterance,onError]);
 
  const close=useCallback((session:Session)=>{
   if(session.closed)return;
   session.closed=true;session.controller.abort();
-  if(session.quietTimer)clearTimeout(session.quietTimer);
   if(session.disconnectTimer)clearTimeout(session.disconnectTimer);
   if(session.readyTimer)clearTimeout(session.readyTimer);
   if(session.drainTimer)clearTimeout(session.drainTimer);
@@ -70,7 +67,7 @@ export function useRealtimeVoice({onFinalUtterance,onError}:Options){
  },[]);
 
  const flush=useCallback((session:Session)=>{
-  if(session.quietTimer){clearTimeout(session.quietTimer);session.quietTimer=null}
+  session.buffer.cancelAutoCommit();
   if(session.closed)return;
   const text=session.buffer.flush();if(!text)return;
   if(mounted.current)setPartial(session.buffer.unfinishedPreview());
@@ -85,14 +82,16 @@ export function useRealtimeVoice({onFinalUtterance,onError}:Options){
 
  const terminate=useCallback((session:Session,reason='',failure=false)=>{
   if(session.closed)return;
-  // Only completed transcriptions are sent to the durable chat outbox. Keep
-  // the last unfinished words visible so an interrupted instruction is never
-  // mistaken for a submitted one.
-  const unfinished=session.buffer.unfinishedPreview();
-  const lostFinal=session.drain.awaitingFinal||!!unfinished;
-  flush(session);
+  // An earlier completed item may be only the first half of a correction.
+  // If the last item is unfinished (or the recognized sentence plainly trails
+  // off), preserve the whole candidate for review instead of executing it.
+  const needsReview=session.buffer.hasUnfinished()||session.buffer.hasIncompleteCandidate();
+  const unfinished=needsReview?session.buffer.preview():'';
+  unsentRef.current=unfinished;
+  const lostFinal=session.drain.awaitingFinal||needsReview;
+  if(!needsReview)flush(session);
   close(session);
-  const notice=[reason,lostFinal?'最后一句尚未提交，请重新说一遍。':''].filter(Boolean).join(' ');
+  const notice=[reason,lostFinal?'最后一句尚未提交，可继续说或放入输入框核对。':''].filter(Boolean).join(' ');
   if(mounted.current){setStatus(failure?'error':'idle');setPartial(unfinished);setError(notice);setMuted(false)}
   if(notice)errorRef.current?.(notice);
  },[close,flush]);
@@ -105,11 +104,11 @@ export function useRealtimeVoice({onFinalUtterance,onError}:Options){
  const end=useCallback(():Promise<void>=>{
   startSequence.current++;preflight.current?.abort();preflight.current=null;startPromise.current=null;
   const session=sessionRef.current;
-  if(!session){if(mounted.current){setStatus('idle');setPartial('');setError('');setMuted(false)}return Promise.resolve()}
+  if(!session){if(mounted.current){setStatus('idle');setPartial(unsentRef.current);setError('');setMuted(false)}return Promise.resolve()}
   if(session.draining)return session.drainPromise||Promise.resolve();
   if(!session.ready){terminate(session);return Promise.resolve()}
   session.draining=true;session.drain.begin();
-  if(session.quietTimer){clearTimeout(session.quietTimer);session.quietTimer=null}
+  session.buffer.cancelAutoCommit();
   const track=session.stream?.getAudioTracks()[0];if(track)track.enabled=false;
   session.muted=true;
   if(mounted.current){setStatus('ending');setMuted(true)}
@@ -157,7 +156,7 @@ export function useRealtimeVoice({onFinalUtterance,onError}:Options){
   if(typeof RTCPeerConnection==='undefined'||!navigator.mediaDevices?.getUserMedia){
    const message='当前浏览器不支持实时语音通话，请使用新版 Chrome 或 Edge。';setStatus('error');setError(message);errorRef.current?.(message);return false;
   }
-  setStatus('connecting');setError('');setPartial('');setMuted(false);
+  unsentRef.current='';setStatus('connecting');setError('');setPartial('');setMuted(false);
   const sequence=++startSequence.current,check=new AbortController();preflight.current=check;
   const checkTimer=setTimeout(()=>check.abort(),12000);
   let session:Session|undefined;
@@ -177,7 +176,8 @@ export function useRealtimeVoice({onFinalUtterance,onError}:Options){
    // An explicit End can occur during media permission or SDP exchange.
    // Attach a handler now so its rejection is never left unobserved.
    void readyPromise.catch(()=>{});
-   session={pc,sender:transceiver.sender,controller,channels:new Set(),stream:null,eventChannel:null,buffer:new RealtimeTurnBuffer(),drain:new RealtimeVoiceDrain(),created:false,updateSent:false,ready:false,muted:false,responding:false,closed:false,draining:false,quietTimer:null,disconnectTimer:null,readyTimer:null,drainTimer:null,settleTimer:null,stopMicTimer:null,drainPromise:null,resolveDrain:null,resolveReady,rejectReady};
+   const buffer=new RealtimeTurnBuffer({onReady:()=>{if(session&&!session.draining)flush(session)}});
+   session={pc,sender:transceiver.sender,controller,channels:new Set(),stream:null,eventChannel:null,buffer,drain:new RealtimeVoiceDrain(),created:false,updateSent:false,ready:false,muted:false,responding:false,closed:false,draining:false,disconnectTimer:null,readyTimer:null,drainTimer:null,settleTimer:null,stopMicTimer:null,drainPromise:null,resolveDrain:null,resolveReady,rejectReady};
    sessionRef.current=session;
    const current=session;
    current.readyTimer=setTimeout(()=>fail(current,'实时语音初始化超时，请重试。'),READY_MS);
@@ -189,14 +189,10 @@ export function useRealtimeVoice({onFinalUtterance,onError}:Options){
     if(current.closed||!current.created||current.updateSent||pc.connectionState!=='connected'||current.eventChannel?.readyState!=='open')return;
     current.updateSent=send(current.eventChannel,realtimeSessionUpdate(config.model,'event_'+crypto.randomUUID()));
    };
-   const scheduleFlush=()=>{
-    if(current.draining){
-     if(current.settleTimer){clearTimeout(current.settleTimer);current.settleTimer=null}
-     if(current.drain.canSettle)current.settleTimer=setTimeout(()=>terminate(current),DRAIN_SETTLE_MS);
-     return;
-    }
-    if(current.quietTimer)clearTimeout(current.quietTimer);
-    current.quietTimer=setTimeout(()=>flush(current),QUIET_MS);
+   const scheduleDrainSettle=()=>{
+    if(!current.draining)return;
+    if(current.settleTimer){clearTimeout(current.settleTimer);current.settleTimer=null}
+    if(current.drain.canSettle)current.settleTimer=setTimeout(()=>terminate(current),DRAIN_SETTLE_MS);
    };
    const onEvent=(event:ModelEvent,channel:RTCDataChannel)=>{
     if(current.closed)return;
@@ -213,9 +209,28 @@ export function useRealtimeVoice({onFinalUtterance,onError}:Options){
       }).catch(cause=>fail(current,'麦克风无法接入实时频道：'+description(cause)));
       break;
      case 'input_audio_buffer.speech_started':
+      // A new phrase may start before the previous item's quiet timer fires.
+      // Even before the first delta arrives, the earlier text is not a turn.
+      current.buffer.speechStarted(event.item_id||'');
       if(event.item_id)current.drain.speech(event.item_id);
       if(current.settleTimer){clearTimeout(current.settleTimer);current.settleTimer=null}
       if(mounted.current&&!current.draining)setError('');
+      break;
+     case 'input_audio_buffer.speech_stopped':
+      if(event.reason==='turn_invalid'&&event.item_id){
+       current.drain.failed(event.item_id);
+       const preview=current.buffer.invalid(event.item_id);
+       if(mounted.current)setPartial(preview);
+       scheduleDrainSettle();
+      }
+      break;
+     case 'conversation.item.ambient_audio_transcription.completed':
+      if(event.item_id){
+       current.drain.failed(event.item_id);
+       const preview=current.buffer.invalid(event.item_id);
+       if(mounted.current)setPartial(preview);
+       scheduleDrainSettle();
+      }
       break;
      case 'conversation.item.input_audio_transcription.delta':{
       const id=event.item_id||event.event_id;if(!id)return;
@@ -230,15 +245,15 @@ export function useRealtimeVoice({onFinalUtterance,onError}:Options){
       current.drain.completed(id);
       if(current.buffer.complete(id,event.transcript||'')){
        if(mounted.current)setPartial(current.buffer.preview());
-       scheduleFlush();
       }
+      if(current.draining){current.buffer.cancelAutoCommit();scheduleDrainSettle()}
       break;
      }
      case 'conversation.item.input_audio_transcription.failed':{
       const id=event.item_id||event.event_id;
       if(id){current.drain.failed(id);if(mounted.current)setPartial(current.buffer.failed(id))}
-      if(current.draining&&current.drain.canSettle)scheduleFlush();
-      const message='刚才那句没有识别清楚，请再说一次。';if(mounted.current){setError(message);errorRef.current?.(message)}
+      if(current.draining&&current.drain.canSettle)scheduleDrainSettle();
+      const message='刚才有一段没有识别清楚，整句话未提交，请重新说完整。';if(mounted.current){setError(message);errorRef.current?.(message)}
       break;
      }
      case 'response.created':current.responding=true;break;
@@ -304,7 +319,7 @@ export function useRealtimeVoice({onFinalUtterance,onError}:Options){
   return()=>{mounted.current=false;stop();window.removeEventListener('pagehide',stop);document.removeEventListener('visibilitychange',hidden)};
  },[stopNow]);
 
- return {status,partial,error,start,end,mute,interrupt,muted,active:status==='connecting'||status==='listening'||status==='muted'||status==='ending',
+ return {status,partial,error,start,end,mute,interrupt,muted,getUnsentText:()=>unsentRef.current,active:status==='connecting'||status==='listening'||status==='muted'||status==='ending',
   // Canonical replies are spoken by the existing /api/qwen/tts path. Sending
   // them into Realtime as a model prompt could paraphrase or hallucinate them.
   speak:()=>{}};

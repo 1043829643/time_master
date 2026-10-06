@@ -4,7 +4,7 @@ import {useCallback, useEffect, useRef, useState} from 'react';
 import {requestJson, errorMessage} from '@/lib/api-client';
 import {recordingToWav} from '@/lib/audio';
 import {advanceVad, initialVadState, VOICE_MIN_SPEECH_MS, VOICE_SAMPLE_MS, type VadState} from '@/lib/continuous-voice-vad';
-import {nextEndDrainAction} from '@/lib/continuous-voice-drain';
+import {completeVoiceGroup, nextEndDrainAction, parseVoiceGroupPartId, remainingVoiceTurnQuietMs, voiceGroupPartId, voiceTurnNeedsContinuation} from '@/lib/continuous-voice-drain';
 import {clearPendingVoice, listPendingVoice, pendingVoiceKey, removePendingVoice, savePendingVoice, type PendingVoiceTurn} from '@/lib/continuous-voice-recovery';
 
 export type ContinuousVoiceStatus = 'idle' | 'connecting' | 'listening' | 'muted' | 'error';
@@ -16,7 +16,8 @@ type Options = {
 };
 
 type Clip = {id: string; blob: Blob};
-type PendingTurn = {id: string; texts: string[]; timer: ReturnType<typeof setTimeout> | null};
+type TurnPart = {text?: string; blob?: Blob};
+type PendingTurn = {id: string; texts: string[]; parts: TurnPart[]; timer: ReturnType<typeof setTimeout> | null};
 type Segment = {
   recorder: MediaRecorder;
   chunks: Blob[];
@@ -45,6 +46,8 @@ type Session = {
   version: number;
   delivered: Set<string>;
   pendingTurn: PendingTurn | null;
+  blocked: boolean;
+  lastVoiceAt: number;
   delivering: boolean;
   saving: number;
   drainPromise: Promise<void>;
@@ -53,7 +56,6 @@ type Session = {
 
 const MAX_RECORDED_BYTES = 5_500_000;
 const MAX_WAITING_CLIPS = 4;
-const FINAL_MERGE_MS = 1500;
 const MIME_TYPES = ['audio/webm;codecs=opus', 'audio/webm', 'audio/mp4', 'audio/ogg;codecs=opus'];
 
 function microphoneError(error: unknown): string {
@@ -78,6 +80,8 @@ function blobDataUrl(blob: Blob): Promise<string> {
 export function useContinuousVoice({scope, onFinalUtterance, onError}: Options) {
   const [status, setStatus] = useState<ContinuousVoiceStatus>('idle');
   const [error, setError] = useState('');
+  const [partial, setPartial] = useState('');
+  const unsentForReviewRef = useRef('');
   const [muted, setMuted] = useState(false);
   const [pendingCount, setPendingCount] = useState(0);
   const sessionRef = useRef<Session | null>(null);
@@ -114,6 +118,10 @@ export function useContinuousVoice({scope, onFinalUtterance, onError}: Options) 
     if (!mounted.current) return;
     setError(message);
     try { errorCallback.current?.(message); } catch { /* UI callbacks must not keep capture alive. */ }
+  }
+
+  function updatePartial(value: string) {
+    if (mounted.current) setPartial(value);
   }
 
   async function holdForRetry(session: Session, id: string, value: {blob?: Blob; text?: string}): Promise<boolean> {
@@ -160,6 +168,7 @@ export function useContinuousVoice({scope, onFinalUtterance, onError}: Options) 
     startingRef.current = null;
     retryController.current?.abort();
     const session = sessionRef.current;
+    const unsent = session?.pendingTurn?.texts.join(' ').trim();
     sessionRef.current = null;
     if (session) {
       session.closed = true;
@@ -180,6 +189,8 @@ export function useContinuousVoice({scope, onFinalUtterance, onError}: Options) 
       session.resolveDrain();
     }
     if (mounted.current) {
+      if (unsent && !session?.blocked) { updatePartial(unsent); unsentForReviewRef.current = unsent; }
+      else if (session?.blocked) updatePartial('');
       setMuted(false);
       setStatus(message ? 'error' : 'idle');
       if (message) report(message);
@@ -207,25 +218,71 @@ export function useContinuousVoice({scope, onFinalUtterance, onError}: Options) 
 
   function finishEnding(session: Session) {
     const action = nextEndDrainAction({ending: session.ending, closed: session.closed, recording: !!session.segment, recorderStopping: session.stopping, recognizing: session.processing, queuedClips: session.queue.length, delivering: session.delivering, saving: session.saving, pendingText: !!session.pendingTurn});
-    if (action === 'deliver') { void deliverPending(session); return; }
+    if (action === 'deliver') { void (session.blocked ? persistBlocked(session) : deliverPending(session)); return; }
     if (action !== 'finish') return;
     session.closed = true;
     if (sessionRef.current === session) sessionRef.current = null;
     session.resolveDrain();
   }
 
-  async function deliverPending(session: Session) {
+  async function persistBlocked(session: Session) {
     if (session.closed || sessionRef.current !== session) return;
     const pending = session.pendingTurn;
     if (!pending) return;
     if (pending.timer) clearTimeout(pending.timer);
+    updatePartial('');
+    unsentForReviewRef.current = '';
     session.pendingTurn = null;
     session.delivering = true;
     try {
-      await finalCallback.current(pending.texts.join(' ').trim(), pending.id);
+      // Keep every recognized fragment and failed recording in order. A retry
+      // must reconstruct the WHOLE turn; submitting only the surviving words
+      // would silently change the user's instruction.
+      const count = pending.parts.length;
+      const saved = await Promise.all(pending.parts.map((part, index) =>
+        holdForRetry(session, voiceGroupPartId(pending.id, count, index), part)));
+      report(saved.every(Boolean)
+        ? '有一段语音没有识别清楚，整句话已暂存；重试成功后才会一起提交。'
+        : '有一段语音没有识别清楚，整句话仅在当前页面暂存；请先下载，再刷新。');
+    } finally {
+      session.delivering = false;
+      finishEnding(session);
+    }
+  }
+
+  async function deliverPending(session: Session) {
+    if (session.closed || sessionRef.current !== session) return;
+    if (!session.ending && (session.blocked || session.vad.speaking || session.vad.consecutiveVoice || session.segment || session.stopping || session.processing || session.queue.length)) {
+      armPending(session);
+      return;
+    }
+    const pending = session.pendingTurn;
+    if (!pending) return;
+    const text = pending.texts.join(' ').trim();
+    if (voiceTurnNeedsContinuation(text)) {
+      if (pending.timer) clearTimeout(pending.timer);
+      pending.timer = null;
+      updatePartial(text);
+      if (session.ending) {
+        unsentForReviewRef.current = text;
+        session.pendingTurn = null;
+        report('最后一句听起来还没说完，已留在界面，请核对后再发送。');
+        finishEnding(session);
+      }
+      return;
+    }
+    if (pending.timer) clearTimeout(pending.timer);
+    session.pendingTurn = null;
+    session.delivering = true;
+    try {
+      await finalCallback.current(text, pending.id);
+      updatePartial('');
+      unsentForReviewRef.current = '';
     } catch (cause) {
       if (!session.closed) {
-        const saved = await holdForRetry(session, pending.id, {text: pending.texts.join(' ').trim()});
+        const saved = await holdForRetry(session, pending.id, {text});
+        updatePartial(saved ? '' : text);
+        unsentForReviewRef.current = saved ? '' : text;
         report((saved ? '识别文字已暂存在此工作区，可重试或下载：' : '识别文字仅在当前页面暂存，请先下载：') + errorMessage(cause));
       }
     } finally {
@@ -241,16 +298,39 @@ export function useContinuousVoice({scope, onFinalUtterance, onError}: Options) 
     if (!pending) return;
     if (pending.timer) clearTimeout(pending.timer);
     pending.timer = null;
-    if (session.vad.speaking || session.segment || session.stopping || session.processing || session.queue.length) return;
-    pending.timer = setTimeout(() => { void deliverPending(session); }, FINAL_MERGE_MS);
+    if (session.blocked || session.vad.speaking || session.vad.consecutiveVoice || session.segment || session.stopping || session.processing || session.queue.length) return;
+    const delay = remainingVoiceTurnQuietMs(pending.texts.join(' '), session.lastVoiceAt, performance.now());
+    if (!Number.isFinite(delay)) return;
+    pending.timer = setTimeout(() => { void deliverPending(session); }, delay);
   }
 
   function stageFinal(session: Session, text: string, id: string) {
     if (session.delivered.has(id)) return;
     session.delivered.add(id);
-    if (session.pendingTurn) session.pendingTurn.texts.push(text);
-    else session.pendingTurn = {id, texts: [text], timer: null};
+    if (session.pendingTurn) {
+      session.pendingTurn.texts.push(text);
+      session.pendingTurn.parts.push({text});
+    } else session.pendingTurn = {id, texts: [text], parts: [{text}], timer: null};
+    updatePartial(session.pendingTurn.texts.join(' ').trim());
     armPending(session);
+  }
+
+  function stageFailed(session: Session, clip: Clip) {
+    if (!session.pendingTurn) session.pendingTurn = {id: clip.id, texts: [], parts: [], timer: null};
+    session.pendingTurn.parts.push({blob: clip.blob});
+    session.blocked = true;
+    updatePartial('');
+    unsentForReviewRef.current = '';
+    if (session.pendingTurn.timer) clearTimeout(session.pendingTurn.timer);
+    session.pendingTurn.timer = null;
+    if (!session.ending) {
+      session.ending = true;
+      const spokenMs = session.vad.speaking ? Math.max(VOICE_MIN_SPEECH_MS, session.vad.lastVoiceAt - session.vad.startedAt) : 0;
+      if (session.segment) stopSegment(session, spokenMs, !session.vad.speaking);
+      releaseCapture(session);
+      if (mounted.current) { setMuted(false); setStatus('error'); }
+    }
+    report('一段语音未能识别，已停止通话并保留整句话；暂不会执行残缺指令。');
   }
 
   async function processQueue(session: Session) {
@@ -268,8 +348,8 @@ export function useContinuousVoice({scope, onFinalUtterance, onError}: Options) 
           stageFinal(session, text, clip.id);
         } catch (cause) {
           if (!session.closed && version === session.version && !controller.signal.aborted) {
-            const saved = await holdForRetry(session, clip.id, {blob: clip.blob});
-            report((saved ? '这句话没有识别成功，录音已暂存在此工作区，可重试或下载：' : '这句话没有识别成功，录音仅在当前页面暂存，请先下载：') + errorMessage(cause));
+            stageFailed(session, clip);
+            report('语音识别未完成，整句话暂不执行：' + errorMessage(cause));
           }
         } finally {
           if (session.request === controller) session.request = null;
@@ -334,8 +414,15 @@ export function useContinuousVoice({scope, onFinalUtterance, onError}: Options) 
     let power = 0;
     for (let i = 0; i < session.samples.length; i++) power += session.samples[i] * session.samples[i];
     const rms = Math.sqrt(power / session.samples.length);
+    const wasCandidate = session.vad.consecutiveVoice > 0;
     const result = advanceVad(session.vad, rms, performance.now());
     session.vad = result.state;
+    if (result.state.speaking && result.state.lastVoiceAt) session.lastVoiceAt = result.state.lastVoiceAt;
+    if (result.state.consecutiveVoice && session.pendingTurn?.timer) {
+      clearTimeout(session.pendingTurn.timer);
+      session.pendingTurn.timer = null;
+    }
+    if (wasCandidate && !result.state.consecutiveVoice && !result.state.speaking && result.event === 'none') armPending(session);
     if (result.event === 'start') {
       if (session.pendingTurn?.timer) clearTimeout(session.pendingTurn.timer);
       if (session.pendingTurn) session.pendingTurn.timer = null;
@@ -346,6 +433,7 @@ export function useContinuousVoice({scope, onFinalUtterance, onError}: Options) 
 
   async function begin(): Promise<boolean> {
     const token = ++sequence.current;
+    unsentForReviewRef.current = '';
     if (mounted.current) { setError(''); setStatus('connecting'); setMuted(false); }
     if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === 'undefined') {
       if (token === sequence.current) shutdown('当前浏览器不支持连续录音，请使用新版浏览器或直接输入。');
@@ -381,7 +469,7 @@ export function useContinuousVoice({scope, onFinalUtterance, onError}: Options) 
       monitor.connect(context.destination);
       let resolveDrain!: () => void;
       const drainPromise = new Promise<void>(resolve => { resolveDrain = resolve; });
-      const session: Session = {scope: scope || '', closed: false, ending: false, muted: false, stream, context, source, analyser, monitor, samples: new Float32Array(new ArrayBuffer(analyser.fftSize * 4)), timer: null, vad: initialVadState(), segment: null, stopping: false, queue: [], processing: false, request: null, version: 0, delivered: new Set(), pendingTurn: null, delivering: false, saving: 0, drainPromise, resolveDrain};
+      const session: Session = {scope: scope || '', closed: false, ending: false, muted: false, stream, context, source, analyser, monitor, samples: new Float32Array(new ArrayBuffer(analyser.fftSize * 4)), timer: null, vad: initialVadState(), segment: null, stopping: false, queue: [], processing: false, request: null, version: 0, delivered: new Set(), pendingTurn: null, blocked: false, lastVoiceAt: 0, delivering: false, saving: 0, drainPromise, resolveDrain};
       sessionRef.current = session;
       stream.getAudioTracks().forEach(track => {
         track.onended = () => { if (sessionRef.current === session) shutdown('麦克风连接已断开，连续语音已结束。'); };
@@ -427,7 +515,7 @@ export function useContinuousVoice({scope, onFinalUtterance, onError}: Options) 
 
   function mute(next?: boolean) {
     const session = sessionRef.current;
-    if (!session || session.closed) return;
+    if (!session || session.closed || session.ending) return;
     const shouldMute = next ?? !session.muted;
     if (session.muted === shouldMute) return;
     session.muted = shouldMute;
@@ -441,12 +529,14 @@ export function useContinuousVoice({scope, onFinalUtterance, onError}: Options) 
 
   function interrupt() {
     const session = sessionRef.current;
-    if (!session || session.closed) return;
+    if (!session || session.closed || session.ending) return;
     session.version++;
     session.request?.abort();
     session.queue.length = 0;
     if (session.pendingTurn?.timer) clearTimeout(session.pendingTurn.timer);
     session.pendingTurn = null;
+    updatePartial('');
+    unsentForReviewRef.current = '';
     session.vad = initialVadState(session.vad.noiseFloor);
     stopSegment(session, 0, true);
     setError('');
@@ -461,13 +551,63 @@ export function useContinuousVoice({scope, onFinalUtterance, onError}: Options) 
     retryController.current = controller;
     const run = (async () => {
       const items = await pendingItems(forScope);
+      const handledGroups = new Set<string>();
       for (const item of items) {
         if (controller.signal.aborted || activeScope.current !== forScope) break;
+        const groupPart = parseVoiceGroupPartId(item.id);
+        if (groupPart) {
+          if (handledGroups.has(groupPart.groupId)) continue;
+          handledGroups.add(groupPart.groupId);
+          const group = items.filter(candidate => parseVoiceGroupPartId(candidate.id)?.groupId === groupPart.groupId)
+            .sort((a, b) => parseVoiceGroupPartId(a.id)!.index - parseVoiceGroupPartId(b.id)!.index);
+          const complete = completeVoiceGroup(group.map(part => part.id));
+          if (!complete && !group.some(part => part.delivered)) {
+            report('这段语音暂存不完整，不能提交残缺指令；请先下载留存并重新说完整。');
+            continue;
+          }
+          try {
+            if (!group.some(part => part.delivered)) {
+              const texts: string[] = [];
+              for (const part of group) {
+                if (controller.signal.aborted || activeScope.current !== forScope) break;
+                const text = part.text || (part.blob ? await transcribeBlob(part.blob, controller.signal) : '');
+                if (!text) throw new Error('整句中有一段语音仍未识别成功。');
+                if (!part.text) {
+                  const recognized = {...part, text};
+                  memoryPending.current = [...memoryPending.current.filter(old => old.key !== part.key), recognized];
+                  try { await savePendingVoice(recognized); } catch { /* Keep the words in this page. */ }
+                }
+                texts.push(text);
+              }
+              if (controller.signal.aborted || activeScope.current !== forScope) break;
+              if (texts.length !== group.length) throw new Error('整句语音尚未全部识别。');
+              const combined = texts.join(' ').trim();
+              if (voiceTurnNeedsContinuation(combined)) throw new Error('整句听起来仍未说完，请下载核对后重新说完整。');
+              await finalCallback.current(combined, groupPart.groupId);
+              for (const part of group) {
+                const delivered = {...part, blob: undefined, size: 0, delivered: true};
+                memoryPending.current = [...memoryPending.current.filter(old => old.key !== part.key), delivered];
+                try { await savePendingVoice(delivered); } catch { /* Keep the receipt in this page. */ }
+              }
+            }
+            for (const part of group) {
+              await removePendingVoice(forScope, part.id);
+              memoryPending.current = memoryPending.current.filter(old => old.key !== part.key);
+            }
+            await refreshPending(forScope);
+          } catch (cause) {
+            if (controller.signal.aborted) break;
+            report('整句语音仍未能提交，所有片段均已保留供重试或下载：' + errorMessage(cause));
+            await refreshPending(forScope);
+          }
+          continue;
+        }
         let text = item.text;
         try {
           if (!item.delivered) {
             if (!text && item.blob) text = await transcribeBlob(item.blob, controller.signal);
             if (!text) throw new Error('暂存内容为空，无法重试。');
+            if (voiceTurnNeedsContinuation(text)) throw new Error('这句话听起来仍未说完，请下载核对后重新说完整。');
             if (controller.signal.aborted || activeScope.current !== forScope) break;
             await finalCallback.current(text, item.id);
             const delivered = {...item, text, blob: undefined, size: 0, delivered: true};
@@ -501,16 +641,19 @@ export function useContinuousVoice({scope, onFinalUtterance, onError}: Options) 
     const items = await pendingItems(forScope);
     if (!items.length) { report('当前没有待下载的语音暂存。'); return; }
     for (const item of items) {
-      const blob = item.blob || new Blob([item.text || ''], {type: 'text/plain;charset=utf-8'});
-      const extension = item.blob ? item.blob.type.includes('mp4') ? '.mp4' : item.blob.type.includes('ogg') ? '.ogg' : '.webm' : '.txt';
-      const url = URL.createObjectURL(blob);
-      const link = document.createElement('a');
-      link.href = url;
-      link.download = `连续语音暂存-${item.createdAt.slice(0, 10)}-${item.id.slice(0, 8)}${extension}`;
-      document.body.appendChild(link);
-      link.click();
-      link.remove();
-      setTimeout(() => URL.revokeObjectURL(url), 1000);
+      const name = `连续语音暂存-${item.createdAt.slice(0, 10)}-${item.id.replace(/[^a-z0-9-]/giu, '-').slice(-48)}`;
+      const download = (blob: Blob, extension: string) => {
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement('a');
+        link.href = url;
+        link.download = name + extension;
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 1000);
+      };
+      if (item.blob) download(item.blob, item.blob.type.includes('mp4') ? '.mp4' : item.blob.type.includes('ogg') ? '.ogg' : '.webm');
+      if (item.text || !item.blob) download(new Blob([item.text || ''], {type: 'text/plain;charset=utf-8'}), '.txt');
     }
   }
 
@@ -548,5 +691,5 @@ export function useContinuousVoice({scope, onFinalUtterance, onError}: Options) 
     };
   }, []);
 
-  return {status, partial: '', error, start, end, mute, interrupt, muted, active: status === 'connecting' || status === 'listening' || status === 'muted', pendingCount, retryPending, downloadPending, discardPending};
+  return {status, partial, getUnsentText: () => unsentForReviewRef.current, error, start, end, mute, interrupt, muted, active: status === 'connecting' || status === 'listening' || status === 'muted', pendingCount, retryPending, downloadPending, discardPending};
 }

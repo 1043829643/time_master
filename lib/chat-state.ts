@@ -62,13 +62,13 @@ export async function chatUpdates(db:D1Database,user:string,after:number,until?:
  return {messages:page.flatMap(r=>[{id:r.request_id+'-u',role:'user' as const,content:r.request_text,at:r.created_at},{id:r.request_id+'-a',role:'assistant' as const,content:r.reply,at:r.created_at}]),nextAfter:hasMore?page.at(-1)!.sequence:watermark,hasMore,watermark};
 }
 
-export async function commitWorkspace(db:D1Database,user:string,current:Snapshot,data:Snapshot['data'],operationId:string,hash=''){
- return commitRecords(db,user,current,data,operationId,hash);
+export async function commitWorkspace(db:D1Database,user:string,current:Snapshot,data:Snapshot['data'],operationId:string,hash='',delayedTransitions:PlanTransition[]=[]){
+ return commitRecords(db,user,current,data,operationId,hash,delayedTransitions);
 }
 
 // Both statements run in one transaction. A unique token prevents a losing retry
 // from updating the workspace using another request's already-saved receipt.
-export type ConversationCommit={memories?:ConversationMemory[];forgotten?:string[];transitions?:PlanTransition[];audit?:unknown;lease?:string;execution?:{operations:Proposal['operations'];sourceProposalId?:string}};
+export type ConversationCommit={memories?:ConversationMemory[];forgotten?:string[];transitions?:PlanTransition[];requiredPendingTransitionIds?:string[];audit?:unknown;lease?:string;execution?:{operations:Proposal['operations'];sourceProposalId?:string}};
 export async function commitChat(db:D1Database,user:string,current:Snapshot,requestId:string,text:string,reply:string,draft:Proposal|null,workRevision:number,baseline?:ChangeBaseline,conversation:ConversationCommit={}){
  const at=new Date().toISOString(),commitToken=crypto.randomUUID();
  const executed=conversation.execution?applyOperations(current.data,conversation.execution.operations,requestId+'-execute','时间伙伴执行'):current.data;
@@ -78,6 +78,10 @@ export async function commitChat(db:D1Database,user:string,current:Snapshot,requ
  const source=conversation.execution?.sourceProposalId;
  const automaticTransitions=conversation.execution?await transitionsForWrite(db,user,current.data,data,operationEffects(current.data,data),source):[];
  if(source){condition+=" AND EXISTS (SELECT 1 FROM chat_receipts WHERE owner=? AND request_id=? AND proposal_state='pending')";args.push(user,source)}
+ if(conversation.requiredPendingTransitionIds?.length){
+  condition+=" AND NOT EXISTS (SELECT 1 FROM json_each(?) ids WHERE NOT EXISTS (SELECT 1 FROM chat_receipts c WHERE c.owner=? AND c.request_id=ids.value AND c.proposal_state='pending'))";
+  args.push(JSON.stringify(conversation.requiredPendingTransitionIds),user);
+ }
  const results=await db.batch([
   commitHeader(db,user,current,data,commitToken,condition,args),
   ...recordStatements(db,user,commitToken,current.data,data),
@@ -85,7 +89,7 @@ export async function commitChat(db:D1Database,user:string,current:Snapshot,requ
   db.prepare(`INSERT INTO chat_receipts (owner,request_id,request_text,reply,proposal,work_revision,commit_token,created_at,base_records,sequence,payload_version,protocol_version,turn_context) SELECT ?,?,?,?,?,?,?,?,?,?,1,2,? WHERE ${commitGuard}`).bind(user,requestId,text,reply,draft?JSON.stringify({summary:draft.summary}):null,workRevision,commitToken,at,baseline?'parts':null,current.revision+1,conversation.audit?JSON.stringify(conversation.audit):null,user,commitToken),
   ...chatPartStatements(db,user,requestId,commitToken,draft,baseline),
   ...targetStatements(db,user,requestId,commitToken,draft?.operations||[]),
-  ...transitionStatements(db,user,commitToken,[...automaticTransitions,...conversation.transitions||[]]),
+  ...transitionStatements(db,user,commitToken,[...new Map([...automaticTransitions,...conversation.transitions||[]].map(t=>[t.id,t])).values()]),
   ...memoryStatements(db,user,commitToken,conversation.memories||[],conversation.forgotten||[]),
   ...(source?[db.prepare(`UPDATE chat_receipts SET proposal_state='applied' WHERE owner=? AND request_id=? AND ${commitGuard}`).bind(user,source,user,commitToken)]:[]),
   ...(conversation.lease?completeRequestStatements(db,user,requestId,commitToken,conversation.lease):[]),

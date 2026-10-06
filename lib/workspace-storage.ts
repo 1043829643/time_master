@@ -2,7 +2,7 @@ import {reconcileMemoryStatements} from './conversation-memory.ts';
 import {emptyData,validateData,type Data,type Snapshot,type Operation} from './domain.ts';
 import {kinds,records,captureBaseline,stable,type ChangeBaseline} from './changes.ts';
 import {fingerprint} from './fingerprint.ts';
-import {transitionsForWrite,transitionStatements} from './proposal-lifecycle.ts';
+import {transitionsForWrite,transitionStatements,type PlanTransition} from './proposal-lifecycle.ts';
 
 export const collections=['projects','tasks','blocks','contacts','resources','captures','followups','messages','history'] as const;
 type StoredRecord={kind:string;id:string;payload:string;position:number};
@@ -103,12 +103,14 @@ export function verifyOperation(receipt:OperationReceipt|null,expected:ChangeBas
  if(!receipt||receipt.status!=='applied'||expected.length!==receipt.records.length||expected.some(e=>!receipt.records.some(r=>r.kind===e.kind&&r.id===e.id&&stable(r.value)===stable(e.value))))throw new Error('已收到保存结果，正在核对实际变化。请用原请求重试，不要重复新建。');
  return receipt;
 }
-export async function commitRecords(db:D1Database,owner:string,current:Snapshot,data:Data,operationId:string,hash:string){
+export async function commitRecords(db:D1Database,owner:string,current:Snapshot,data:Data,operationId:string,hash:string,delayedTransitions:PlanTransition[]=[]){
  const token=crypto.randomUUID(),applying=operationId.endsWith('-apply');
  let condition=' AND NOT EXISTS (SELECT 1 FROM operation_receipts WHERE owner=? AND operation_id=?)',args:unknown[]=[owner,operationId];
  if(applying){condition+=" AND EXISTS (SELECT 1 FROM chat_receipts WHERE owner=? AND request_id=? AND proposal_state='pending' AND proposal IS NOT NULL)";args.push(owner,operationId.slice(0,-6));}
+ if(delayedTransitions.length){condition+=" AND NOT EXISTS (SELECT 1 FROM json_each(?) ids WHERE NOT EXISTS (SELECT 1 FROM chat_receipts c WHERE c.owner=? AND c.request_id=ids.value AND c.proposal_state='pending'))";args.push(JSON.stringify(delayedTransitions.map(t=>t.id)),owner)}
  const effects=operationEffects(current.data,data);
- const transitions=await transitionsForWrite(db,owner,current.data,data,effects,applying?operationId.slice(0,-6):undefined);
+ const automaticTransitions=await transitionsForWrite(db,owner,current.data,data,effects,applying?operationId.slice(0,-6):undefined);
+ const transitions=[...new Map([...automaticTransitions,...delayedTransitions].map(t=>[t.id,t])).values()];
  const result=await db.batch([
   commitHeader(db,owner,current,data,token,condition,args),
   ...recordStatements(db,owner,token,current.data,data),

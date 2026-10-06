@@ -24,26 +24,36 @@ test('short spike is ignored; a spoken phrase ends after a pause', () => {
   next = step(state, 0.05, 150); state = next.state;
   assert.equal(next.event, 'start');
   for (let time = 200; time <= 700; time += 50) state = step(state, 0.04, time).state;
-  for (let time = 750; time < 2400; time += 50) {
+  for (let time = 750; time < 3500; time += 50) {
     next = step(state, 0.001, time); state = next.state;
     assert.equal(next.event, 'none');
   }
-  next = step(state, 0.001, 2400);
+  next = step(state, 0.001, 3500);
   assert.equal(next.event, 'finish');
   assert.ok(next.speechMs >= VOICE_MIN_SPEECH_MS);
   assert.equal(next.state.speaking, false);
+});
+
+test('a one-sample noise spike is rejected so a pending complete turn can keep its timer', () => {
+  const candidate = step(initialVadState(), 0.05, 100);
+  assert.equal(candidate.event, 'none');
+  assert.equal(candidate.state.consecutiveVoice, 1);
+  const rejected = step(candidate.state, 0.001, 150);
+  assert.equal(rejected.event, 'none');
+  assert.equal(rejected.state.consecutiveVoice, 0);
+  assert.equal(rejected.state.speaking, false);
 });
 
 test('a natural pause followed by a correction remains one turn', () => {
   let state = step(initialVadState(), 0.05, 0).state;
   state = step(state, 0.05, 50).state;
   for (let time = 100; time <= 500; time += 50) state = step(state, 0.05, time).state;
-  for (let time = 550; time <= 1650; time += 50) {
+  for (let time = 550; time <= 2550; time += 50) {
     const next = step(state, 0.001, time);
     assert.equal(next.event, 'none');
     state = next.state;
   }
-  const correction = step(state, 0.05, 1700);
+  const correction = step(state, 0.05, 2600);
   assert.equal(correction.event, 'none');
   assert.equal(correction.state.speaking, true);
 });
@@ -54,8 +64,9 @@ test('a long utterance is bounded and another turn can begin', () => {
   assert.equal(next.event, 'start');
   next = step(state, 0.06, VOICE_MAX_TURN_MS);
   assert.equal(next.event, 'limit');
-  assert.equal(next.state.speaking, false);
+  assert.equal(next.state.speaking, true);
   state = step(next.state, 0.06, VOICE_MAX_TURN_MS + 50).state;
   next = step(state, 0.06, VOICE_MAX_TURN_MS + 100);
-  assert.equal(next.event, 'start');
+  assert.equal(next.event, 'none');
+  assert.equal(next.state.speaking, true);
 });
